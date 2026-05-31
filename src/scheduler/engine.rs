@@ -28,6 +28,13 @@ struct ScheduleEntry {
     task_id: Uuid,
 }
 
+struct TaskCompletion {
+    task_id: Uuid,
+    task_name: String,
+    next_run: Option<DateTime<Utc>>,
+    trigger_type: TriggerType,
+}
+
 impl PartialEq for ScheduleEntry {
     fn eq(&self, other: &Self) -> bool {
         self.next_run == other.next_run && self.task_id == other.task_id
@@ -76,6 +83,7 @@ impl SchedulerEngine {
         info!("Scheduler engine starting");
         let mut heap: BinaryHeap<Reverse<ScheduleEntry>> = BinaryHeap::new();
         let mut paused = false;
+        let (completion_tx, mut completion_rx) = mpsc::channel::<TaskCompletion>(64);
 
         self.load_tasks(&mut heap);
 
@@ -102,13 +110,49 @@ impl SchedulerEngine {
                             self.load_tasks(&mut heap);
                         }
                         SchedulerCommand::TriggerNow(task_id, reply) => {
-                            let result = self.trigger_task(task_id).await;
-                            let _ = reply.send(result);
+                            let pool = self.pool.clone();
+                            let gotify_url = self.gotify_url.clone();
+                            let tx = completion_tx.clone();
+                            tokio::spawn(async move {
+                                let result = run_task(pool, gotify_url, task_id, true).await;
+                                if let Some(comp) = result {
+                                    let _ = tx.send(comp).await;
+                                }
+                                let _ = reply.send(Ok(()));
+                            });
                         }
                         SchedulerCommand::Shutdown => {
                             info!("Scheduler shutting down");
                             break;
                         }
+                    }
+                }
+                Some(completion) = completion_rx.recv() => {
+                    info!("Task '{}' completed, rescheduling", completion.task_name);
+                    let conn = match self.pool.lock() {
+                        Ok(c) => c,
+                        Err(e) => {
+                            error!("DB lock failed: {e}");
+                            continue;
+                        }
+                    };
+                    if let Some(next) = completion.next_run {
+                        let _ = task_repo::update_task_run_info(&conn, completion.task_id, None, Some(next), None, None);
+                        heap.push(Reverse(ScheduleEntry {
+                            next_run: next,
+                            task_id: completion.task_id,
+                        }));
+                    } else if completion.trigger_type == TriggerType::Once {
+                        let _ = task_repo::set_task_enabled(&conn, completion.task_id, false);
+                        let _ = task_repo::update_task_run_info(
+                            &conn,
+                            completion.task_id,
+                            None,
+                            None,
+                            Some(TaskStatus::Completed),
+                            None,
+                        );
+                        info!("One-time task '{}' completed and disabled", completion.task_name);
                     }
                 }
                 _ = async {
@@ -121,7 +165,14 @@ impl SchedulerEngine {
                 }, if !paused && next_entry.is_some() => {
                     if let Some(Reverse(entry)) = heap.pop() {
                         if entry.next_run <= Utc::now() {
-                            self.execute_and_reschedule(&mut heap, entry.task_id).await;
+                            let pool = self.pool.clone();
+                            let gotify_url = self.gotify_url.clone();
+                            let tx = completion_tx.clone();
+                            tokio::spawn(async move {
+                                if let Some(comp) = run_task(pool, gotify_url, entry.task_id, false).await {
+                                    let _ = tx.send(comp).await;
+                                }
+                            });
                         } else {
                             heap.push(Reverse(entry));
                         }
@@ -185,258 +236,182 @@ impl SchedulerEngine {
             }
         }
     }
+}
 
-    async fn execute_and_reschedule(
-        &self,
-        heap: &mut BinaryHeap<Reverse<ScheduleEntry>>,
-        task_id: Uuid,
-    ) {
-        let task = {
-            let conn = match self.pool.lock() {
-                Ok(c) => c,
-                Err(e) => {
-                    error!("DB lock failed: {e}");
-                    return;
-                }
-            };
-            match task_repo::get_task(&conn, task_id) {
-                Ok(Some(t)) => t,
-                Ok(None) => {
-                    warn!("Task {task_id} not found, skipping");
-                    return;
-                }
-                Err(e) => {
-                    error!("Failed to get task {task_id}: {e}");
-                    return;
-                }
+async fn run_task(
+    pool: DbPool,
+    gotify_url: Option<String>,
+    task_id: Uuid,
+    is_manual: bool,
+) -> Option<TaskCompletion> {
+    let task = {
+        let conn = match pool.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                error!("DB lock failed: {e}");
+                return None;
             }
         };
-
-        if !task.enabled || task.status != TaskStatus::Active {
-            return;
-        }
-
-        let task_name = task.name.clone();
-        let max_retries = task.max_retries;
-        info!("Executing task '{}' ({task_id})", task_name);
-
-        let mut success = false;
-        let mut last_exit_code: Option<i32> = None;
-
-        for attempt in 0..=max_retries {
-            if attempt > 0 {
-                info!("Retrying task '{}' attempt {}/{}", task_name, attempt, max_retries);
+        match task_repo::get_task(&conn, task_id) {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                warn!("Task {task_id} not found, skipping");
+                return None;
             }
-
-            let history = {
-                let conn = match self.pool.lock() {
-                    Ok(c) => c,
-                    Err(e) => {
-                        error!("DB lock failed: {e}");
-                        return;
-                    }
-                };
-                match history_repo::insert_history(&conn, task_id, RunStatus::Running) {
-                    Ok(h) => h,
-                    Err(e) => {
-                        error!("Failed to create history: {e}");
-                        return;
-                    }
-                }
-            };
-
-            let result = executor::execute_task(&task).await;
-
-            {
-                let conn = match self.pool.lock() {
-                    Ok(c) => c,
-                    Err(e) => {
-                        error!("DB lock failed: {e}");
-                        return;
-                    }
-                };
-                match result {
-                    Ok(output) => {
-                        let failed = output.exit_code.is_some_and(|c| c != 0);
-                        last_exit_code = output.exit_code;
-                        let run_status = if failed { RunStatus::Failed } else { RunStatus::Success };
-                        let error_msg = if failed {
-                            Some(format!("Command exited with code {}", output.exit_code.unwrap_or(-1)))
-                        } else {
-                            None
-                        };
-                        let _ = history_repo::update_history_result(
-                            &conn,
-                            history.id,
-                            run_status,
-                            output.exit_code,
-                            output.stdout.clone(),
-                            output.stderr.clone(),
-                            error_msg,
-                        );
-                        if failed {
-                            warn!("Task '{}' failed with exit code {}", task_name, output.exit_code.unwrap_or(-1));
-                        } else {
-                            success = true;
-                            info!("Task '{}' completed successfully", task_name);
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        let status = if e.to_string().contains("timeout") {
-                            RunStatus::Timeout
-                        } else {
-                            RunStatus::Failed
-                        };
-                        let _ = history_repo::update_history_result(
-                            &conn,
-                            history.id,
-                            status,
-                            None,
-                            None,
-                            None,
-                            Some(e.to_string()),
-                        );
-                        warn!("Task '{}' failed: {e}", task_name);
-                    }
-                }
+            Err(e) => {
+                error!("Failed to get task {task_id}: {e}");
+                return None;
             }
         }
+    };
 
-        {
-            let conn = match self.pool.lock() {
-                Ok(c) => c,
-                Err(e) => {
-                    error!("DB lock failed: {e}");
-                    return;
-                }
-            };
-            let last_run_status = if success { "success" } else { "failed" };
-            let _ = task_repo::update_task_run_info(
-                &conn,
-                task_id,
-                Some(Utc::now()),
-                None,
-                None,
-                Some(last_run_status),
-            );
-
-            if let Some(next) = self.calculate_next_run(&task) {
-                let _ = task_repo::update_task_run_info(&conn, task_id, None, Some(next), None, None);
-                heap.push(Reverse(ScheduleEntry {
-                    next_run: next,
-                    task_id,
-                }));
-            } else if task.trigger_type == TriggerType::Once {
-                let _ = task_repo::set_task_enabled(&conn, task_id, false);
-                let _ = task_repo::update_task_run_info(
-                    &conn,
-                    task_id,
-                    None,
-                    None,
-                    Some(TaskStatus::Completed),
-                    None,
-                );
-                info!("One-time task '{}' completed and disabled", task_name);
-            }
-        }
-
-        // Send Gotify notification (outside DB lock)
-        if let Some(ref url) = self.gotify_url {
-            gotify::notify_task_result(
-                Some(url),
-                task.gotify_token.as_deref(),
-                &task_name,
-                success,
-                last_exit_code,
-            ).await;
-        }
+    if !task.enabled || task.status != TaskStatus::Active {
+        return None;
     }
 
-    async fn trigger_task(&self, task_id: Uuid) -> Result<()> {
-        let task = {
-            let conn = self.pool.lock().map_err(|e| anyhow::anyhow!("Lock failed: {e}"))?;
-            task_repo::get_task(&conn, task_id)?
-                .ok_or_else(|| anyhow::anyhow!("Task not found"))?
-        };
+    let task_name = task.name.clone();
+    let max_retries = task.max_retries;
+    let trigger_type = task.trigger_type.clone();
+    info!("Executing task '{}' ({task_id})", task_name);
 
-        info!("Manually triggering task '{}'", task.name);
+    let mut success = false;
+    let mut last_exit_code: Option<i32> = None;
+
+    for attempt in 0..=max_retries {
+        if attempt > 0 {
+            info!("Retrying task '{}' attempt {}/{}", task_name, attempt, max_retries);
+        }
 
         let history = {
-            let conn = self.pool.lock().map_err(|e| anyhow::anyhow!("Lock failed: {e}"))?;
-            history_repo::insert_history(&conn, task_id, RunStatus::Running)?
+            let conn = match pool.lock() {
+                Ok(c) => c,
+                Err(e) => {
+                    error!("DB lock failed: {e}");
+                    return None;
+                }
+            };
+            match history_repo::insert_history(&conn, task_id, RunStatus::Running) {
+                Ok(h) => h,
+                Err(e) => {
+                    error!("Failed to create history: {e}");
+                    return None;
+                }
+            }
         };
 
         let result = executor::execute_task(&task).await;
 
-        let (success, exit_code) = {
-            let conn = self.pool.lock().map_err(|e| anyhow::anyhow!("Lock failed: {e}"))?;
+        {
+            let conn = match pool.lock() {
+                Ok(c) => c,
+                Err(e) => {
+                    error!("DB lock failed: {e}");
+                    return None;
+                }
+            };
             match result {
                 Ok(output) => {
                     let failed = output.exit_code.is_some_and(|c| c != 0);
-                    let status = if failed { RunStatus::Failed } else { RunStatus::Success };
+                    last_exit_code = output.exit_code;
+                    let run_status = if failed { RunStatus::Failed } else { RunStatus::Success };
                     let error_msg = if failed {
                         Some(format!("Command exited with code {}", output.exit_code.unwrap_or(-1)))
                     } else {
                         None
                     };
-                    history_repo::update_history_result(
+                    let _ = history_repo::update_history_result(
+                        &conn,
+                        history.id,
+                        run_status,
+                        output.exit_code,
+                        output.stdout.clone(),
+                        output.stderr.clone(),
+                        error_msg,
+                    );
+                    if failed {
+                        warn!("Task '{}' failed with exit code {}", task_name, output.exit_code.unwrap_or(-1));
+                    } else {
+                        success = true;
+                        info!("Task '{}' completed successfully", task_name);
+                        break;
+                    }
+                }
+                Err(e) => {
+                    let status = if e.to_string().contains("timeout") {
+                        RunStatus::Timeout
+                    } else {
+                        RunStatus::Failed
+                    };
+                    let _ = history_repo::update_history_result(
                         &conn,
                         history.id,
                         status,
-                        output.exit_code,
-                        output.stdout,
-                        output.stderr,
-                        error_msg,
-                    )?;
-                    let last_run_status = if failed { "failed" } else { "success" };
-                    task_repo::update_task_run_info(
-                        &conn,
-                        task_id,
-                        Some(Utc::now()),
-                        None,
-                        None,
-                        Some(last_run_status),
-                    )?;
-                    (!failed, output.exit_code)
-                }
-                Err(e) => {
-                    history_repo::update_history_result(
-                        &conn,
-                        history.id,
-                        RunStatus::Failed,
                         None,
                         None,
                         None,
                         Some(e.to_string()),
-                    )?;
-                    task_repo::update_task_run_info(
-                        &conn,
-                        task_id,
-                        Some(Utc::now()),
-                        None,
-                        None,
-                        Some("failed"),
-                    )?;
-                    (false, None)
+                    );
+                    warn!("Task '{}' failed: {e}", task_name);
                 }
             }
+        }
+    }
+
+    // Update task run info
+    let next_run = {
+        let conn = match pool.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                error!("DB lock failed: {e}");
+                return None;
+            }
         };
+        let last_run_status = if success { "success" } else { "failed" };
+        let _ = task_repo::update_task_run_info(
+            &conn,
+            task_id,
+            Some(Utc::now()),
+            None,
+            None,
+            Some(last_run_status),
+        );
 
-        // Send Gotify notification (outside DB lock)
-        if let Some(ref url) = self.gotify_url {
-            gotify::notify_task_result(
-                Some(url),
-                task.gotify_token.as_deref(),
-                &task.name,
-                success,
-                exit_code,
-            ).await;
-        }
+        calculate_next_run_for_task(&task)
+    };
 
-        if !success {
-            return Err(anyhow::anyhow!("Task '{}' failed", task.name));
+    // Send Gotify notification (outside DB lock)
+    if let Some(ref url) = gotify_url {
+        gotify::notify_task_result(
+            Some(url),
+            task.gotify_token.as_deref(),
+            &task_name,
+            success,
+            last_exit_code,
+        ).await;
+    }
+
+    if is_manual {
+        info!("Manual task '{}' completed", task_name);
+    }
+
+    Some(TaskCompletion {
+        task_id,
+        task_name,
+        next_run,
+        trigger_type,
+    })
+}
+
+fn calculate_next_run_for_task(task: &Task) -> Option<DateTime<Utc>> {
+    match task.trigger_type {
+        TriggerType::Cron => {
+            let schedule = Schedule::from_str(&task.trigger_expr).ok()?;
+            schedule.after(&Utc::now()).next()
         }
-        Ok(())
+        TriggerType::Once => None,
+        TriggerType::Interval => {
+            let secs: u64 = task.trigger_expr.parse().ok()?;
+            Some(Utc::now() + chrono::Duration::seconds(secs as i64))
+        }
     }
 }
