@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Task Scheduler</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<nav class="topbar">
+    <div class="brand">Task Scheduler</div>
+    <div class="nav-links">
+        <a href="#" data-page="dashboard" class="active">Dashboard</a>
+        <a href="#" data-page="tasks">Tasks</a>
+        <a href="#" data-page="history">History</a>
+    </div>
+    <div class="nav-right">
+        <span id="scheduler-status" class="status-badge">--</span>
+        <button id="btn-logout" class="btn btn-sm btn-outline" style="display:none">Logout</button>
+    </div>
+</nav>
+
+<div id="auth-screen" class="auth-screen" style="display:none">
+    <div class="auth-box">
+        <h2>Authentication Required</h2>
+        <input type="password" id="auth-token-input" placeholder="Enter token...">
+        <button id="btn-login" class="btn btn-primary">Login</button>
+        <p id="auth-error" class="error-text" style="display:none"></p>
+    </div>
+</div>
+
+<div id="app" class="container">
+    <div id="page-dashboard" class="page active">
+        <h1>Dashboard</h1>
+        <div id="stats-cards" class="stats-grid"></div>
+    </div>
+
+    <div id="page-tasks" class="page" style="display:none">
+        <div class="page-header">
+            <h1>Tasks</h1>
+            <button id="btn-new-task" class="btn btn-primary">+ New Task</button>
+        </div>
+        <div class="filters">
+            <input type="text" id="task-search" placeholder="Search tasks...">
+            <select id="task-status-filter">
+                <option value="">All Status</option>
+                <option value="active">Active</option>
+                <option value="paused">Paused</option>
+                <option value="completed">Completed</option>
+                <option value="failed">Failed</option>
+            </select>
+            <select id="task-trigger-filter">
+                <option value="">All Triggers</option>
+                <option value="cron">Cron</option>
+                <option value="once">Once</option>
+                <option value="interval">Interval</option>
+            </select>
+        </div>
+        <div id="tasks-table-container"></div>
+    </div>
+
+    <div id="page-history" class="page" style="display:none">
+        <h1>Execution History</h1>
+        <div id="history-table-container"></div>
+    </div>
+</div>
+
+<div id="task-modal" class="modal" style="display:none">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h2 id="modal-title">New Task</h2>
+            <button class="modal-close" id="modal-close">&times;</button>
+        </div>
+        <form id="task-form">
+            <input type="hidden" id="task-id">
+            <div class="form-group">
+                <label>Name</label>
+                <input type="text" id="task-name" required>
+            </div>
+            <div class="form-group">
+                <label>Description</label>
+                <textarea id="task-description" rows="2"></textarea>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Trigger Type</label>
+                    <select id="task-trigger-type" required>
+                        <option value="cron">Cron</option>
+                        <option value="once">Once</option>
+                        <option value="interval">Interval</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label id="trigger-expr-label">Cron Expression</label>
+                    <input type="text" id="task-trigger-expr" placeholder="0 0 * * * *" required>
+                </div>
+            </div>
+            <div class="form-group">
+                <label>Action Type</label>
+                <select id="task-action-type" required>
+                    <option value="command">Command</option>
+                    <option value="webhook">Webhook</option>
+                </select>
+            </div>
+            <div id="command-config" class="form-group">
+                <label>Command</label>
+                <input type="text" id="task-program" placeholder="e.g., python">
+                <label>Arguments (one per line)</label>
+                <textarea id="task-args" rows="2" placeholder="script.py&#10;--verbose"></textarea>
+                <label>Working Directory</label>
+                <input type="text" id="task-workdir" placeholder="/path/to/dir">
+            </div>
+            <div id="webhook-config" class="form-group" style="display:none">
+                <label>URL</label>
+                <input type="text" id="task-webhook-url" placeholder="https://example.com/webhook">
+                <label>Method</label>
+                <select id="task-webhook-method">
+                    <option value="GET">GET</option>
+                    <option value="POST">POST</option>
+                    <option value="PUT">PUT</option>
+                </select>
+                <label>Body</label>
+                <textarea id="task-webhook-body" rows="2" placeholder='{"key":"value"}'></textarea>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Max Retries</label>
+                    <input type="number" id="task-max-retries" value="0" min="0">
+                </div>
+                <div class="form-group">
+                    <label>Timeout (seconds)</label>
+                    <input type="number" id="task-timeout" value="3600" min="0">
+                </div>
+            </div>
+            <div class="form-actions">
+                <button type="button" class="btn btn-outline" id="btn-cancel">Cancel</button>
+                <button type="submit" class="btn btn-primary">Save</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div id="detail-modal" class="modal" style="display:none">
+    <div class="modal-content modal-lg">
+        <div class="modal-header">
+            <h2 id="detail-title">Task Detail</h2>
+            <button class="modal-close" id="detail-modal-close">&times;</button>
+        </div>
+        <div id="detail-body"></div>
+    </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
