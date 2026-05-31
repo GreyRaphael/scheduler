@@ -103,7 +103,11 @@ async function loadTasks(page) {
     if (trigger) qs += `&trigger_type=${trigger}`;
     try {
         const data = await api('/tasks' + qs);
-        const rows = data.items.map(t => `
+        const rows = data.items.map(t => {
+            const lastResult = t.last_run_status
+                ? badge(t.last_run_status === 'success' ? 'success' : 'failed', t.last_run_status)
+                : '-';
+            return `
             <tr>
                 <td><a href="#" onclick="viewTask('${t.id}');return false" style="color:var(--primary)">${esc(t.name)}</a></td>
                 <td>${badge(t.status, t.status)}</td>
@@ -111,6 +115,7 @@ async function loadTasks(page) {
                 <td><code>${esc(t.trigger_expr)}</code></td>
                 <td>${t.enabled ? badge('active','ON') : badge('paused','OFF')}</td>
                 <td>${relTime(t.last_run_at)}</td>
+                <td>${lastResult}</td>
                 <td>${relTime(t.next_run_at)}</td>
                 <td class="actions-cell">
                     <button class="btn btn-sm btn-outline" onclick="triggerTask('${t.id}')">Run</button>
@@ -119,7 +124,7 @@ async function loadTasks(page) {
                     <button class="btn btn-sm btn-danger" onclick="deleteTask('${t.id}','${esc(t.name)}')">Del</button>
                 </td>
             </tr>
-        `).join('');
+        `}).join('');
         const totalPages = Math.ceil(data.total / data.per_page);
         let pagination = '<div class="pagination">';
         for (let i = 1; i <= totalPages && i <= 20; i++) {
@@ -128,7 +133,7 @@ async function loadTasks(page) {
         pagination += '</div>';
         document.getElementById('tasks-table-container').innerHTML = data.items.length ? `
             <table>
-                <thead><tr><th>Name</th><th>Status</th><th>Trigger</th><th>Expression</th><th>Enabled</th><th>Last Run</th><th>Next Run</th><th>Actions</th></tr></thead>
+                <thead><tr><th>Name</th><th>Status</th><th>Trigger</th><th>Expression</th><th>Enabled</th><th>Last Run</th><th>Last Result</th><th>Next Run</th><th>Actions</th></tr></thead>
                 <tbody>${rows}</tbody>
             </table>
             ${pagination}
@@ -203,6 +208,7 @@ async function viewTask(id) {
                     <div class="detail-item"><div class="label">Timeout</div><div class="val">${task.timeout_secs ?? '-'}s</div></div>
                     <div class="detail-item"><div class="label">Created</div><div class="val">${formatTime(task.created_at)}</div></div>
                     <div class="detail-item"><div class="label">Last Run</div><div class="val">${formatTime(task.last_run_at)}</div></div>
+                    <div class="detail-item"><div class="label">Last Result</div><div class="val">${task.last_run_status ? badge(task.last_run_status === 'success' ? 'success' : 'failed', task.last_run_status) : '-'}</div></div>
                     <div class="detail-item"><div class="label">Next Run</div><div class="val">${formatTime(task.next_run_at)}</div></div>
                 </div>
             </div>

@@ -97,6 +97,7 @@ pub struct Task {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub last_run_at: Option<DateTime<Utc>>,
+    pub last_run_status: Option<String>,
     pub next_run_at: Option<DateTime<Utc>>,
     pub max_retries: u32,
     pub timeout_secs: Option<u64>,

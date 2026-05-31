@@ -55,10 +55,24 @@ async fn execute_command(task: &Task, timeout: Duration) -> Result<TaskOutput> {
     let config: CommandConfig = serde_json::from_value(task.action_config.clone())
         .context("Failed to parse command action config")?;
 
-    debug!("Running command: {} {:?}", config.program, config.args);
+    let shell_cmd = if config.args.is_empty() {
+        config.program.clone()
+    } else {
+        format!("{} {}", config.program, config.args.join(" "))
+    };
 
-    let mut cmd = Command::new(&config.program);
-    cmd.args(&config.args);
+    debug!("Running command via shell: {}", shell_cmd);
+
+    let mut cmd = if cfg!(target_os = "windows") {
+        let mut c = Command::new("cmd");
+        c.args(["/C", &shell_cmd]);
+        c
+    } else {
+        let mut c = Command::new("sh");
+        c.args(["-c", &shell_cmd]);
+        c
+    };
+
     cmd.envs(&config.env);
     if let Some(ref dir) = config.working_dir {
         cmd.current_dir(dir);

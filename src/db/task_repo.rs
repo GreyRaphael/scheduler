@@ -28,12 +28,13 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
             .get::<_, Option<String>>(11)?
             .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
             .map(|dt| dt.with_timezone(&Utc)),
+        last_run_status: row.get(12)?,
         next_run_at: row
-            .get::<_, Option<String>>(12)?
+            .get::<_, Option<String>>(13)?
             .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
             .map(|dt| dt.with_timezone(&Utc)),
-        max_retries: row.get::<_, i64>(13)? as u32,
-        timeout_secs: row.get::<_, Option<i64>>(14)?.map(|v| v as u64),
+        max_retries: row.get::<_, i64>(14)? as u32,
+        timeout_secs: row.get::<_, Option<i64>>(15)?.map(|v| v as u64),
     })
 }
 
@@ -44,8 +45,8 @@ pub fn insert_task(conn: &rusqlite::Connection, req: CreateTaskRequest) -> Resul
     let max_retries = req.max_retries.unwrap_or(0) as i32;
     let timeout = req.timeout_secs.map(|v| v as i64);
     conn.execute(
-        "INSERT INTO tasks (id, name, description, trigger_type, trigger_expr, action_type, action_config, status, enabled, created_at, updated_at, max_retries, timeout_secs)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        "INSERT INTO tasks (id, name, description, trigger_type, trigger_expr, action_type, action_config, status, enabled, created_at, updated_at, last_run_status, max_retries, timeout_secs)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         rusqlite::params![
             id.to_string(),
             req.name,
@@ -58,6 +59,7 @@ pub fn insert_task(conn: &rusqlite::Connection, req: CreateTaskRequest) -> Resul
             enabled as i32,
             now,
             now,
+            None::<String>,
             max_retries,
             timeout,
         ],
@@ -207,9 +209,10 @@ pub fn delete_task(conn: &rusqlite::Connection, id: Uuid) -> Result<bool> {
 
 pub fn set_task_enabled(conn: &rusqlite::Connection, id: Uuid, enabled: bool) -> Result<Option<Task>> {
     let now = Utc::now().to_rfc3339();
+    let status = if enabled { "active" } else { "paused" };
     conn.execute(
-        "UPDATE tasks SET enabled = ?1, updated_at = ?2 WHERE id = ?3",
-        rusqlite::params![enabled as i32, now, id.to_string()],
+        "UPDATE tasks SET enabled = ?1, status = ?2, updated_at = ?3 WHERE id = ?4",
+        rusqlite::params![enabled as i32, status, now, id.to_string()],
     )?;
     get_task(conn, id)
 }
@@ -220,14 +223,15 @@ pub fn update_task_run_info(
     last_run_at: Option<DateTime<Utc>>,
     next_run_at: Option<DateTime<Utc>>,
     status: Option<TaskStatus>,
+    last_run_status: Option<&str>,
 ) -> Result<()> {
     let now = Utc::now().to_rfc3339();
     let last = last_run_at.map(|t| t.to_rfc3339());
     let next = next_run_at.map(|t| t.to_rfc3339());
     let status_str = status.map(|s| s.as_str().to_string());
     conn.execute(
-        "UPDATE tasks SET last_run_at = ?1, next_run_at = ?2, status = COALESCE(?3, status), updated_at = ?4 WHERE id = ?5",
-        rusqlite::params![last, next, status_str, now, id.to_string()],
+        "UPDATE tasks SET last_run_at = COALESCE(?1, last_run_at), next_run_at = COALESCE(?2, next_run_at), status = COALESCE(?3, status), last_run_status = COALESCE(?4, last_run_status), updated_at = ?5 WHERE id = ?6",
+        rusqlite::params![last, next, status_str, last_run_status, now, id.to_string()],
     )?;
     Ok(())
 }

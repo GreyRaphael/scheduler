@@ -144,8 +144,13 @@ impl SchedulerEngine {
             }
         };
         for task in tasks {
-            if let Some(next) = self.calculate_next_run(&task) {
-                let _ = task_repo::update_task_run_info(&conn, task.id, None, Some(next), None);
+            let next = task.next_run_at
+                .filter(|t| *t > Utc::now())
+                .or_else(|| self.calculate_next_run(&task));
+            if let Some(next) = next {
+                if task.next_run_at.is_none() {
+                    let _ = task_repo::update_task_run_info(&conn, task.id, None, Some(next), None, None);
+                }
                 heap.push(Reverse(ScheduleEntry {
                     next_run: next,
                     task_id: task.id,
@@ -209,26 +214,89 @@ impl SchedulerEngine {
         }
 
         let task_name = task.name.clone();
+        let max_retries = task.max_retries;
         info!("Executing task '{}' ({task_id})", task_name);
 
-        let history = {
-            let conn = match self.pool.lock() {
-                Ok(c) => c,
-                Err(e) => {
-                    error!("DB lock failed: {e}");
-                    return;
+        let mut success = false;
+
+        for attempt in 0..=max_retries {
+            if attempt > 0 {
+                info!("Retrying task '{}' attempt {}/{}", task_name, attempt, max_retries);
+            }
+
+            let history = {
+                let conn = match self.pool.lock() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        error!("DB lock failed: {e}");
+                        return;
+                    }
+                };
+                match history_repo::insert_history(&conn, task_id, RunStatus::Running) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        error!("Failed to create history: {e}");
+                        return;
+                    }
                 }
             };
-            match history_repo::insert_history(&conn, task_id, RunStatus::Running) {
-                Ok(h) => h,
-                Err(e) => {
-                    error!("Failed to create history: {e}");
-                    return;
+
+            let result = executor::execute_task(&task).await;
+
+            {
+                let conn = match self.pool.lock() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        error!("DB lock failed: {e}");
+                        return;
+                    }
+                };
+                match result {
+                    Ok(output) => {
+                        let failed = output.exit_code.map_or(false, |c| c != 0);
+                        let run_status = if failed { RunStatus::Failed } else { RunStatus::Success };
+                        let error_msg = if failed {
+                            Some(format!("Command exited with code {}", output.exit_code.unwrap_or(-1)))
+                        } else {
+                            None
+                        };
+                        let _ = history_repo::update_history_result(
+                            &conn,
+                            history.id,
+                            run_status,
+                            output.exit_code,
+                            output.stdout.clone(),
+                            output.stderr.clone(),
+                            error_msg,
+                        );
+                        if failed {
+                            warn!("Task '{}' failed with exit code {}", task_name, output.exit_code.unwrap_or(-1));
+                        } else {
+                            success = true;
+                            info!("Task '{}' completed successfully", task_name);
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        let status = if e.to_string().contains("timeout") {
+                            RunStatus::Timeout
+                        } else {
+                            RunStatus::Failed
+                        };
+                        let _ = history_repo::update_history_result(
+                            &conn,
+                            history.id,
+                            status,
+                            None,
+                            None,
+                            None,
+                            Some(e.to_string()),
+                        );
+                        warn!("Task '{}' failed: {e}", task_name);
+                    }
                 }
             }
-        };
-
-        let result = executor::execute_task(&task).await;
+        }
 
         {
             let conn = match self.pool.lock() {
@@ -238,54 +306,18 @@ impl SchedulerEngine {
                     return;
                 }
             };
-            match result {
-                Ok(output) => {
-                    let _ = history_repo::update_history_result(
-                        &conn,
-                        history.id,
-                        RunStatus::Success,
-                        output.exit_code,
-                        output.stdout,
-                        output.stderr,
-                        None,
-                    );
-                    let _ = task_repo::update_task_run_info(
-                        &conn,
-                        task_id,
-                        Some(Utc::now()),
-                        None,
-                        Some(TaskStatus::Active),
-                    );
-                    info!("Task '{}' completed successfully", task_name);
-                }
-                Err(e) => {
-                    let status = if e.to_string().contains("timeout") {
-                        RunStatus::Timeout
-                    } else {
-                        RunStatus::Failed
-                    };
-                    let _ = history_repo::update_history_result(
-                        &conn,
-                        history.id,
-                        status,
-                        None,
-                        None,
-                        None,
-                        Some(e.to_string()),
-                    );
-                    let _ = task_repo::update_task_run_info(
-                        &conn,
-                        task_id,
-                        Some(Utc::now()),
-                        None,
-                        Some(TaskStatus::Active),
-                    );
-                    warn!("Task '{}' failed: {e}", task_name);
-                }
-            }
+            let last_run_status = if success { "success" } else { "failed" };
+            let _ = task_repo::update_task_run_info(
+                &conn,
+                task_id,
+                Some(Utc::now()),
+                None,
+                None,
+                Some(last_run_status),
+            );
 
             if let Some(next) = self.calculate_next_run(&task) {
-                let _ = task_repo::update_task_run_info(&conn, task_id, None, Some(next), None);
+                let _ = task_repo::update_task_run_info(&conn, task_id, None, Some(next), None, None);
                 heap.push(Reverse(ScheduleEntry {
                     next_run: next,
                     task_id,
@@ -298,6 +330,7 @@ impl SchedulerEngine {
                     None,
                     None,
                     Some(TaskStatus::Completed),
+                    None,
                 );
                 info!("One-time task '{}' completed and disabled", task_name);
             }
@@ -323,15 +356,34 @@ impl SchedulerEngine {
         let conn = self.pool.lock().map_err(|e| anyhow::anyhow!("Lock failed: {e}"))?;
         match result {
             Ok(output) => {
+                let failed = output.exit_code.map_or(false, |c| c != 0);
+                let status = if failed { RunStatus::Failed } else { RunStatus::Success };
+                let error_msg = if failed {
+                    Some(format!("Command exited with code {}", output.exit_code.unwrap_or(-1)))
+                } else {
+                    None
+                };
                 history_repo::update_history_result(
                     &conn,
                     history.id,
-                    RunStatus::Success,
+                    status,
                     output.exit_code,
                     output.stdout,
                     output.stderr,
-                    None,
+                    error_msg,
                 )?;
+                let last_run_status = if failed { "failed" } else { "success" };
+                task_repo::update_task_run_info(
+                    &conn,
+                    task_id,
+                    Some(Utc::now()),
+                    None,
+                    None,
+                    Some(last_run_status),
+                )?;
+                if failed {
+                    return Err(anyhow::anyhow!("Command exited with code {}", output.exit_code.unwrap_or(-1)));
+                }
             }
             Err(e) => {
                 history_repo::update_history_result(
@@ -342,6 +394,14 @@ impl SchedulerEngine {
                     None,
                     None,
                     Some(e.to_string()),
+                )?;
+                task_repo::update_task_run_info(
+                    &conn,
+                    task_id,
+                    Some(Utc::now()),
+                    None,
+                    None,
+                    Some("failed"),
                 )?;
                 return Err(e);
             }

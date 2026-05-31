@@ -62,7 +62,10 @@ async fn create_task(
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     match result {
-        Ok(task) => Ok((StatusCode::CREATED, Json(task))),
+        Ok(task) => {
+            let _ = state.scheduler_tx.try_send(crate::scheduler::SchedulerCommand::Reload);
+            Ok((StatusCode::CREATED, Json(task)))
+        }
         Err(e) => Err(e),
     }
 }
@@ -83,7 +86,10 @@ async fn update_task(
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     match result {
-        Ok(Some(task)) => Ok(Json(task)),
+        Ok(Some(task)) => {
+            let _ = state.scheduler_tx.try_send(crate::scheduler::SchedulerCommand::Reload);
+            Ok(Json(task))
+        }
         Ok(None) => Err(StatusCode::NOT_FOUND),
         Err(e) => Err(e),
     }
@@ -104,7 +110,10 @@ async fn delete_task(
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     match result {
-        Ok(true) => Ok(StatusCode::NO_CONTENT),
+        Ok(true) => {
+            let _ = state.scheduler_tx.try_send(crate::scheduler::SchedulerCommand::Reload);
+            Ok(StatusCode::NO_CONTENT)
+        }
         Ok(false) => Err(StatusCode::NOT_FOUND),
         Err(e) => Err(e),
     }
