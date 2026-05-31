@@ -160,15 +160,21 @@ pub fn update_task(conn: &rusqlite::Connection, id: Uuid, req: UpdateTaskRequest
         params.push(Box::new(desc));
         idx += 1;
     }
+    let mut trigger_changed = false;
     if let Some(tt) = req.trigger_type {
         sets.push(format!("trigger_type = ?{idx}"));
         params.push(Box::new(tt.as_str().to_string()));
         idx += 1;
+        trigger_changed = true;
     }
     if let Some(expr) = req.trigger_expr {
         sets.push(format!("trigger_expr = ?{idx}"));
         params.push(Box::new(expr));
         idx += 1;
+        trigger_changed = true;
+    }
+    if trigger_changed {
+        sets.push("next_run_at = NULL".to_string());
     }
     if let Some(at) = req.action_type {
         sets.push(format!("action_type = ?{idx}"));

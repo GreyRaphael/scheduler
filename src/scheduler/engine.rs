@@ -201,10 +201,10 @@ impl SchedulerEngine {
             let next = task.next_run_at
                 .filter(|t| *t > Utc::now())
                 .or_else(|| self.calculate_next_run(&task));
-            if let Some(next) = next {
-                if task.next_run_at.is_none() {
-                    let _ = task_repo::update_task_run_info(&conn, task.id, None, Some(next), None, None);
-                }
+        if let Some(next) = next {
+            if task.next_run_at != Some(next) {
+                let _ = task_repo::update_task_run_info(&conn, task.id, None, Some(next), None, None);
+            }
                 heap.push(Reverse(ScheduleEntry {
                     next_run: next,
                     task_id: task.id,
