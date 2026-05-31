@@ -18,12 +18,12 @@ async fn status(State(state): State<AppState>) -> impl IntoResponse {
             |r| r.get(0),
         )?;
         let paused: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM tasks WHERE status = 'paused'",
+            "SELECT COUNT(*) FROM tasks WHERE enabled = 0",
             [],
             |r| r.get(0),
         )?;
         let failed: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM tasks WHERE status = 'failed'",
+            "SELECT COUNT(*) FROM execution_history WHERE started_at >= date('now') AND status = 'failed'",
             [],
             |r| r.get(0),
         )?;

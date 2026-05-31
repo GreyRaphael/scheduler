@@ -35,6 +35,7 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
             .map(|dt| dt.with_timezone(&Utc)),
         max_retries: row.get::<_, i64>(14)? as u32,
         timeout_secs: row.get::<_, Option<i64>>(15)?.map(|v| v as u64),
+        gotify_token: row.get(16)?,
     })
 }
 
@@ -45,8 +46,8 @@ pub fn insert_task(conn: &rusqlite::Connection, req: CreateTaskRequest) -> Resul
     let max_retries = req.max_retries.unwrap_or(0) as i32;
     let timeout = req.timeout_secs.map(|v| v as i64);
     conn.execute(
-        "INSERT INTO tasks (id, name, description, trigger_type, trigger_expr, action_type, action_config, status, enabled, created_at, updated_at, last_run_status, max_retries, timeout_secs)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        "INSERT INTO tasks (id, name, description, trigger_type, trigger_expr, action_type, action_config, status, enabled, created_at, updated_at, last_run_status, max_retries, timeout_secs, gotify_token)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         rusqlite::params![
             id.to_string(),
             req.name,
@@ -62,6 +63,7 @@ pub fn insert_task(conn: &rusqlite::Connection, req: CreateTaskRequest) -> Resul
             None::<String>,
             max_retries,
             timeout,
+            req.gotify_token,
         ],
     )?;
     get_task(conn, id)?.ok_or_else(|| anyhow::anyhow!("Failed to retrieve created task"))
@@ -191,6 +193,11 @@ pub fn update_task(conn: &rusqlite::Connection, id: Uuid, req: UpdateTaskRequest
     if let Some(timeout) = req.timeout_secs {
         sets.push(format!("timeout_secs = ?{idx}"));
         params.push(Box::new(timeout as i64));
+        idx += 1;
+    }
+    if let Some(token) = req.gotify_token {
+        sets.push(format!("gotify_token = ?{idx}"));
+        params.push(Box::new(token));
         idx += 1;
     }
 

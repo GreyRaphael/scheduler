@@ -56,7 +56,13 @@ async fn create_task(
     let result = tokio::task::spawn_blocking(move || {
         let conn = pool.lock().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         crate::db::task_repo::insert_task(&conn, req)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+            .map_err(|e| {
+                if e.to_string().contains("UNIQUE") {
+                    StatusCode::CONFLICT
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+            })
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -80,7 +86,13 @@ async fn update_task(
     let result = tokio::task::spawn_blocking(move || {
         let conn = pool.lock().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         crate::db::task_repo::update_task(&conn, uuid, req)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+            .map_err(|e| {
+                if e.to_string().contains("UNIQUE") {
+                    StatusCode::CONFLICT
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+            })
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

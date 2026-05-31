@@ -1,0 +1,16 @@
+# Scheduler Configuration
+
+# Server listen address (can be overridden by CLI --listen or env SCHEDULER_LISTEN)
+# listen = "0.0.0.0:6060"
+
+# Database path (can be overridden by CLI --db or env SCHEDULER_DB)
+# db = "./scheduler.db"
+
+# Authentication token (can be overridden by CLI --token or env SCHEDULER_TOKEN)
+# token = ""
+
+# Log level (can be overridden by CLI --log-level or env SCHEDULER_LOG_LEVEL)
+# log_level = "info"
+
+# Gotify server URL for push notifications
+gotify_url = "http://81.70.96.146:8080/"

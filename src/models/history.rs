@@ -39,6 +39,7 @@ impl RunStatus {
 pub struct ExecutionHistory {
     pub id: Uuid,
     pub task_id: Uuid,
+    pub task_name: String,
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
     pub status: RunStatus,
@@ -52,6 +53,7 @@ pub struct ExecutionHistory {
 #[derive(Debug, Deserialize)]
 pub struct HistoryFilter {
     pub task_id: Option<String>,
+    pub task_name: Option<String>,
     pub status: Option<String>,
     pub page: Option<u32>,
     pub per_page: Option<u32>,

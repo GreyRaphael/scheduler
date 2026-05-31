@@ -101,6 +101,7 @@ pub struct Task {
     pub next_run_at: Option<DateTime<Utc>>,
     pub max_retries: u32,
     pub timeout_secs: Option<u64>,
+    pub gotify_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,6 +115,7 @@ pub struct CreateTaskRequest {
     pub enabled: Option<bool>,
     pub max_retries: Option<u32>,
     pub timeout_secs: Option<u64>,
+    pub gotify_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -127,6 +129,7 @@ pub struct UpdateTaskRequest {
     pub enabled: Option<bool>,
     pub max_retries: Option<u32>,
     pub timeout_secs: Option<u64>,
+    pub gotify_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

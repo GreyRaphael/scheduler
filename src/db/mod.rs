@@ -27,7 +27,8 @@ pub fn init_db(db_path: &str) -> Result<DbPool> {
             last_run_status TEXT,
             next_run_at     TEXT,
             max_retries     INTEGER NOT NULL DEFAULT 0,
-            timeout_secs    INTEGER
+            timeout_secs    INTEGER,
+            gotify_token    TEXT
         )",
     )?;
     // Migration: add last_run_status column if missing
@@ -36,6 +37,20 @@ pub fn init_db(db_path: &str) -> Result<DbPool> {
         .any(|name| name.as_deref() == Ok("last_run_status"));
     if !has_col {
         conn.execute_batch("ALTER TABLE tasks ADD COLUMN last_run_status TEXT")?;
+    }
+    // Migration: add gotify_token column if missing
+    let has_col: bool = conn.prepare("PRAGMA table_info(tasks)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .any(|name| name.as_deref() == Ok("gotify_token"));
+    if !has_col {
+        conn.execute_batch("ALTER TABLE tasks ADD COLUMN gotify_token TEXT")?;
+    }
+    // Migration: add UNIQUE constraint on name if missing
+    let has_unique: bool = conn.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'")?
+        .query_row([], |row| row.get::<_, String>(0))?
+        .contains("UNIQUE");
+    if !has_unique {
+        conn.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_name ON tasks(name)")?;
     }
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS execution_history (

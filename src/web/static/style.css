@@ -285,3 +285,13 @@ pre.output-block {
     padding: 40px;
     color: var(--text-dim);
 }
+
+.auto-refresh-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: var(--text-dim);
+    cursor: pointer;
+}
+.auto-refresh-label input { cursor: pointer; }

@@ -70,7 +70,12 @@ function navigate(page) {
     document.querySelector(`[data-page="${page}"]`).classList.add('active');
     if (page === 'dashboard') loadDashboard();
     else if (page === 'tasks') loadTasks();
-    else if (page === 'history') loadHistory();
+    else if (page === 'history') {
+        loadHistory();
+        startHistoryAutoRefresh();
+    } else {
+        stopHistoryAutoRefresh();
+    }
 }
 
 async function loadDashboard() {
@@ -146,16 +151,20 @@ async function loadTasks(page) {
 
 let historyPage = 1;
 let historyPerPage = 20;
+let historyAutoRefreshTimer = null;
 
-async function loadHistory(page, taskId) {
+async function loadHistory(page) {
     if (page) historyPage = page;
+    const taskName = document.getElementById('history-task-filter').value;
+    const status = document.getElementById('history-status-filter').value;
     let qs = `?page=${historyPage}&per_page=${historyPerPage}`;
-    if (taskId) qs += `&task_id=${taskId}`;
+    if (taskName) qs += `&task_name=${encodeURIComponent(taskName)}`;
+    if (status) qs += `&status=${status}`;
     try {
         const data = await api('/history' + qs);
         const rows = data.items.map(h => `
             <tr onclick="viewHistory('${h.id}')" style="cursor:pointer">
-                <td>${h.task_id.substring(0,8)}...</td>
+                <td>${esc(h.task_name)}</td>
                 <td>${badge(h.status, h.status)}</td>
                 <td>${formatTime(h.started_at)}</td>
                 <td>${formatTime(h.finished_at)}</td>
@@ -171,7 +180,7 @@ async function loadHistory(page, taskId) {
         pagination += '</div>';
         document.getElementById('history-table-container').innerHTML = data.items.length ? `
             <table>
-                <thead><tr><th>Task ID</th><th>Status</th><th>Started</th><th>Finished</th><th>Exit Code</th><th>Error</th></tr></thead>
+                <thead><tr><th>Task Name</th><th>Status</th><th>Started</th><th>Finished</th><th>Exit Code</th><th>Error</th></tr></thead>
                 <tbody>${rows}</tbody>
             </table>
             ${pagination}
@@ -179,6 +188,28 @@ async function loadHistory(page, taskId) {
     } catch (e) {
         console.error(e);
         document.getElementById('history-table-container').innerHTML = `<div class="empty-state">Failed to load history: ${esc(e.message)}</div>`;
+    }
+}
+
+function startHistoryAutoRefresh() {
+    stopHistoryAutoRefresh();
+    if (document.getElementById('history-auto-refresh').checked) {
+        historyAutoRefreshTimer = setInterval(() => loadHistory(), 5000);
+    }
+}
+
+function stopHistoryAutoRefresh() {
+    if (historyAutoRefreshTimer) {
+        clearInterval(historyAutoRefreshTimer);
+        historyAutoRefreshTimer = null;
+    }
+}
+
+function toggleHistoryAutoRefresh() {
+    if (document.getElementById('history-auto-refresh').checked) {
+        startHistoryAutoRefresh();
+    } else {
+        stopHistoryAutoRefresh();
     }
 }
 
@@ -206,6 +237,7 @@ async function viewTask(id) {
                     <div class="detail-item"><div class="label">Enabled</div><div class="val">${task.enabled ? 'Yes' : 'No'}</div></div>
                     <div class="detail-item"><div class="label">Max Retries</div><div class="val">${task.max_retries}</div></div>
                     <div class="detail-item"><div class="label">Timeout</div><div class="val">${task.timeout_secs ?? '-'}s</div></div>
+                    <div class="detail-item"><div class="label">Gotify Token</div><div class="val">${task.gotify_token ? '***' : '-'}</div></div>
                     <div class="detail-item"><div class="label">Created</div><div class="val">${formatTime(task.created_at)}</div></div>
                     <div class="detail-item"><div class="label">Last Run</div><div class="val">${formatTime(task.last_run_at)}</div></div>
                     <div class="detail-item"><div class="label">Last Result</div><div class="val">${task.last_run_status ? badge(task.last_run_status === 'success' ? 'success' : 'failed', task.last_run_status) : '-'}</div></div>
@@ -303,6 +335,7 @@ async function editTask(id) {
         document.getElementById('task-action-type').value = t.action_type;
         document.getElementById('task-max-retries').value = t.max_retries;
         document.getElementById('task-timeout').value = t.timeout_secs ?? 3600;
+        document.getElementById('task-gotify-token').value = t.gotify_token || '';
         updateTriggerLabel();
         updateActionConfig();
         if (t.action_type === 'command') {
@@ -359,6 +392,7 @@ async function saveTask(e) {
         if (body) actionConfig.body = body;
     }
 
+    const gotifyToken = document.getElementById('task-gotify-token').value.trim();
     const payload = {
         name: document.getElementById('task-name').value,
         description: document.getElementById('task-description').value,
@@ -369,6 +403,7 @@ async function saveTask(e) {
         max_retries: parseInt(document.getElementById('task-max-retries').value) || 0,
         timeout_secs: parseInt(document.getElementById('task-timeout').value) || 3600,
     };
+    if (gotifyToken) payload.gotify_token = gotifyToken;
 
     try {
         if (id) {
@@ -467,6 +502,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
     document.getElementById('task-status-filter').addEventListener('change', () => loadTasks(1));
     document.getElementById('task-trigger-filter').addEventListener('change', () => loadTasks(1));
+
+    let historySearchTimer;
+    document.getElementById('history-task-filter').addEventListener('input', () => {
+        clearTimeout(historySearchTimer);
+        historySearchTimer = setTimeout(() => loadHistory(1), 300);
+    });
+    document.getElementById('history-status-filter').addEventListener('change', () => loadHistory(1));
+    document.getElementById('history-auto-refresh').addEventListener('change', toggleHistoryAutoRefresh);
 
     document.querySelectorAll('.modal').forEach(m => {
         m.addEventListener('click', e => {

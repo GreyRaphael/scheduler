@@ -8,21 +8,24 @@ fn row_to_history(row: &rusqlite::Row) -> rusqlite::Result<ExecutionHistory> {
     Ok(ExecutionHistory {
         id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or_default(),
         task_id: Uuid::parse_str(&row.get::<_, String>(1)?).unwrap_or_default(),
-        started_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(2)?)
+        task_name: row.get(2)?,
+        started_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(3)?)
             .unwrap_or_default()
             .with_timezone(&Utc),
         finished_at: row
-            .get::<_, Option<String>>(3)?
+            .get::<_, Option<String>>(4)?
             .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
             .map(|dt| dt.with_timezone(&Utc)),
-        status: RunStatus::from_str(&row.get::<_, String>(4)?).unwrap_or(RunStatus::Failed),
-        exit_code: row.get(5)?,
-        stdout: row.get(6)?,
-        stderr: row.get(7)?,
-        error_msg: row.get(8)?,
-        retry_count: row.get::<_, u32>(9)?,
+        status: RunStatus::from_str(&row.get::<_, String>(5)?).unwrap_or(RunStatus::Failed),
+        exit_code: row.get(6)?,
+        stdout: row.get(7)?,
+        stderr: row.get(8)?,
+        error_msg: row.get(9)?,
+        retry_count: row.get::<_, u32>(10)?,
     })
 }
+
+const HISTORY_SELECT: &str = "SELECT h.id, h.task_id, t.name, h.started_at, h.finished_at, h.status, h.exit_code, h.stdout, h.stderr, h.error_msg, h.retry_count FROM execution_history h JOIN tasks t ON h.task_id = t.id";
 
 pub fn insert_history(conn: &rusqlite::Connection, task_id: Uuid, status: RunStatus) -> Result<ExecutionHistory> {
     let id = Uuid::new_v4();
@@ -52,7 +55,8 @@ pub fn update_history_result(
 }
 
 pub fn get_history(conn: &rusqlite::Connection, id: Uuid) -> Result<Option<ExecutionHistory>> {
-    let mut stmt = conn.prepare("SELECT * FROM execution_history WHERE id = ?1")?;
+    let sql = format!("{HISTORY_SELECT} WHERE h.id = ?1");
+    let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt.query_map([id.to_string()], row_to_history)?;
     match rows.next() {
         Some(row) => Ok(Some(row?)),
@@ -76,9 +80,8 @@ pub fn list_task_history(
         |row| row.get(0),
     )?;
 
-    let mut stmt = conn.prepare(
-        "SELECT * FROM execution_history WHERE task_id = ?1 ORDER BY started_at DESC LIMIT ?2 OFFSET ?3",
-    )?;
+    let sql = format!("{HISTORY_SELECT} WHERE h.task_id = ?1 ORDER BY h.started_at DESC LIMIT ?2 OFFSET ?3");
+    let mut stmt = conn.prepare(&sql)?;
     let history = stmt
         .query_map(
             rusqlite::params![task_id.to_string(), per_page as i64, offset as i64],
@@ -104,12 +107,17 @@ pub fn list_all_history(conn: &rusqlite::Connection, filter: HistoryFilter) -> R
     let mut idx = 1;
 
     if let Some(ref task_id) = filter.task_id {
-        where_clauses.push(format!("task_id = ?{idx}"));
+        where_clauses.push(format!("h.task_id = ?{idx}"));
         params.push(Box::new(task_id.clone()));
         idx += 1;
     }
+    if let Some(ref task_name) = filter.task_name {
+        where_clauses.push(format!("t.name LIKE ?{idx}"));
+        params.push(Box::new(format!("%{task_name}%")));
+        idx += 1;
+    }
     if let Some(ref status) = filter.status {
-        where_clauses.push(format!("status = ?{idx}"));
+        where_clauses.push(format!("h.status = ?{idx}"));
         params.push(Box::new(status.clone()));
         idx += 1;
     }
@@ -120,7 +128,7 @@ pub fn list_all_history(conn: &rusqlite::Connection, filter: HistoryFilter) -> R
         format!("WHERE {}", where_clauses.join(" AND "))
     };
 
-    let count_sql = format!("SELECT COUNT(*) FROM execution_history {where_sql}");
+    let count_sql = format!("SELECT COUNT(*) FROM execution_history h JOIN tasks t ON h.task_id = t.id {where_sql}");
     let total: i64 = {
         let mut stmt = conn.prepare(&count_sql)?;
         let params_ref: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
@@ -128,7 +136,7 @@ pub fn list_all_history(conn: &rusqlite::Connection, filter: HistoryFilter) -> R
     };
 
     let query_sql = format!(
-        "SELECT * FROM execution_history {where_sql} ORDER BY started_at DESC LIMIT ?{idx} OFFSET ?{}",
+        "{HISTORY_SELECT} {where_sql} ORDER BY h.started_at DESC LIMIT ?{idx} OFFSET ?{}",
         idx + 1
     );
     let mut stmt = conn.prepare(&query_sql)?;

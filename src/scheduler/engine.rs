@@ -10,6 +10,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::db::{history_repo, task_repo, DbPool};
+use crate::gotify;
 use crate::models::{RunStatus, Task, TaskStatus, TriggerType};
 use crate::scheduler::executor;
 
@@ -53,15 +54,17 @@ pub struct SchedulerEngine {
     pool: DbPool,
     cmd_tx: mpsc::Sender<SchedulerCommand>,
     cmd_rx: mpsc::Receiver<SchedulerCommand>,
+    gotify_url: Option<String>,
 }
 
 impl SchedulerEngine {
-    pub fn new(pool: DbPool) -> Self {
+    pub fn new(pool: DbPool, gotify_url: Option<String>) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel(64);
         Self {
             pool,
             cmd_tx,
             cmd_rx,
+            gotify_url,
         }
     }
 
@@ -218,6 +221,7 @@ impl SchedulerEngine {
         info!("Executing task '{}' ({task_id})", task_name);
 
         let mut success = false;
+        let mut last_exit_code: Option<i32> = None;
 
         for attempt in 0..=max_retries {
             if attempt > 0 {
@@ -253,7 +257,8 @@ impl SchedulerEngine {
                 };
                 match result {
                     Ok(output) => {
-                        let failed = output.exit_code.map_or(false, |c| c != 0);
+                        let failed = output.exit_code.is_some_and(|c| c != 0);
+                        last_exit_code = output.exit_code;
                         let run_status = if failed { RunStatus::Failed } else { RunStatus::Success };
                         let error_msg = if failed {
                             Some(format!("Command exited with code {}", output.exit_code.unwrap_or(-1)))
@@ -335,6 +340,17 @@ impl SchedulerEngine {
                 info!("One-time task '{}' completed and disabled", task_name);
             }
         }
+
+        // Send Gotify notification (outside DB lock)
+        if let Some(ref url) = self.gotify_url {
+            gotify::notify_task_result(
+                Some(url),
+                task.gotify_token.as_deref(),
+                &task_name,
+                success,
+                last_exit_code,
+            ).await;
+        }
     }
 
     async fn trigger_task(&self, task_id: Uuid) -> Result<()> {
@@ -353,58 +369,73 @@ impl SchedulerEngine {
 
         let result = executor::execute_task(&task).await;
 
-        let conn = self.pool.lock().map_err(|e| anyhow::anyhow!("Lock failed: {e}"))?;
-        match result {
-            Ok(output) => {
-                let failed = output.exit_code.map_or(false, |c| c != 0);
-                let status = if failed { RunStatus::Failed } else { RunStatus::Success };
-                let error_msg = if failed {
-                    Some(format!("Command exited with code {}", output.exit_code.unwrap_or(-1)))
-                } else {
-                    None
-                };
-                history_repo::update_history_result(
-                    &conn,
-                    history.id,
-                    status,
-                    output.exit_code,
-                    output.stdout,
-                    output.stderr,
-                    error_msg,
-                )?;
-                let last_run_status = if failed { "failed" } else { "success" };
-                task_repo::update_task_run_info(
-                    &conn,
-                    task_id,
-                    Some(Utc::now()),
-                    None,
-                    None,
-                    Some(last_run_status),
-                )?;
-                if failed {
-                    return Err(anyhow::anyhow!("Command exited with code {}", output.exit_code.unwrap_or(-1)));
+        let (success, exit_code) = {
+            let conn = self.pool.lock().map_err(|e| anyhow::anyhow!("Lock failed: {e}"))?;
+            match result {
+                Ok(output) => {
+                    let failed = output.exit_code.is_some_and(|c| c != 0);
+                    let status = if failed { RunStatus::Failed } else { RunStatus::Success };
+                    let error_msg = if failed {
+                        Some(format!("Command exited with code {}", output.exit_code.unwrap_or(-1)))
+                    } else {
+                        None
+                    };
+                    history_repo::update_history_result(
+                        &conn,
+                        history.id,
+                        status,
+                        output.exit_code,
+                        output.stdout,
+                        output.stderr,
+                        error_msg,
+                    )?;
+                    let last_run_status = if failed { "failed" } else { "success" };
+                    task_repo::update_task_run_info(
+                        &conn,
+                        task_id,
+                        Some(Utc::now()),
+                        None,
+                        None,
+                        Some(last_run_status),
+                    )?;
+                    (!failed, output.exit_code)
+                }
+                Err(e) => {
+                    history_repo::update_history_result(
+                        &conn,
+                        history.id,
+                        RunStatus::Failed,
+                        None,
+                        None,
+                        None,
+                        Some(e.to_string()),
+                    )?;
+                    task_repo::update_task_run_info(
+                        &conn,
+                        task_id,
+                        Some(Utc::now()),
+                        None,
+                        None,
+                        Some("failed"),
+                    )?;
+                    (false, None)
                 }
             }
-            Err(e) => {
-                history_repo::update_history_result(
-                    &conn,
-                    history.id,
-                    RunStatus::Failed,
-                    None,
-                    None,
-                    None,
-                    Some(e.to_string()),
-                )?;
-                task_repo::update_task_run_info(
-                    &conn,
-                    task_id,
-                    Some(Utc::now()),
-                    None,
-                    None,
-                    Some("failed"),
-                )?;
-                return Err(e);
-            }
+        };
+
+        // Send Gotify notification (outside DB lock)
+        if let Some(ref url) = self.gotify_url {
+            gotify::notify_task_result(
+                Some(url),
+                task.gotify_token.as_deref(),
+                &task.name,
+                success,
+                exit_code,
+            ).await;
+        }
+
+        if !success {
+            return Err(anyhow::anyhow!("Task '{}' failed", task.name));
         }
         Ok(())
     }

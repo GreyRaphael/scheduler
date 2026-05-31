@@ -1,13 +1,13 @@
 mod api;
 mod config;
 mod db;
+mod gotify;
 mod models;
 mod scheduler;
 
 use anyhow::Result;
 use axum::response::IntoResponse;
 use axum::Router;
-use clap::Parser;
 use rust_embed::Embed;
 use tokio::signal;
 use tower_http::trace::TraceLayer;
@@ -22,22 +22,27 @@ struct Assets;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config = Config::parse();
+    let config = Config::load();
 
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&config.log_level)),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(config.log_level_str())),
         )
         .init();
 
-    info!("Starting scheduler on {}", config.listen);
+    info!("Starting scheduler on {}", config.listen_addr());
+    if let Some(ref url) = config.gotify_url {
+        info!("Gotify notifications enabled: {}", url);
+    } else {
+        info!("Gotify notifications disabled (no gotify_url configured)");
+    }
 
-    let db_path = config.db.to_string_lossy().to_string();
+    let db_path = config.db_path().to_string_lossy().to_string();
     let pool = db::init_db(&db_path)?;
     info!("Database initialized: {db_path}");
 
-    let engine = scheduler::SchedulerEngine::new(pool.clone());
+    let engine = scheduler::SchedulerEngine::new(pool.clone(), config.gotify_url.clone());
     let scheduler_tx = engine.command_sender();
 
     let scheduler_handle = tokio::spawn(async move {
@@ -60,8 +65,8 @@ async fn main() -> Result<()> {
         .merge(static_routes)
         .layer(TraceLayer::new_for_http());
 
-    let listener = tokio::net::TcpListener::bind(config.listen).await?;
-    info!("Listening on {}", config.listen);
+    let listener = tokio::net::TcpListener::bind(config.listen_addr()).await?;
+    info!("Listening on {}", config.listen_addr());
 
     let server = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
 
