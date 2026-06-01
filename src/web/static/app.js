@@ -198,6 +198,16 @@ async function loadHistory(page) {
     }
 }
 
+async function clearAllHistory() {
+    if (!confirm('Clear all execution history? This cannot be undone.')) return;
+    try {
+        await api('/history', { method: 'DELETE' });
+        loadHistory();
+    } catch (e) {
+        alert('Clear failed: ' + e.message);
+    }
+}
+
 async function viewTask(id) {
     try {
         const task = await api('/tasks/' + id);

@@ -154,3 +154,8 @@ pub fn list_all_history(conn: &rusqlite::Connection, filter: HistoryFilter) -> R
         per_page,
     })
 }
+
+pub fn clear_all_history(conn: &rusqlite::Connection) -> Result<u64> {
+    let rows = conn.execute("DELETE FROM execution_history", [])?;
+    Ok(rows as u64)
+}

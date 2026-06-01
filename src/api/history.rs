@@ -27,6 +27,24 @@ async fn list_all_history(
     }
 }
 
+async fn clear_all_history(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let pool = state.pool.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let conn = pool.lock().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        crate::db::history_repo::clear_all_history(&conn)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    match result {
+        Ok(count) => Ok(Json(serde_json::json!({"deleted": count}))),
+        Err(e) => Err(e),
+    }
+}
+
 async fn get_history_detail(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -71,7 +89,7 @@ async fn list_task_history(
 
 pub fn router(_state: AppState) -> Router<AppState> {
     Router::new()
-        .route("/", get(list_all_history))
+        .route("/", get(list_all_history).delete(clear_all_history))
         .route("/{id}", get(get_history_detail))
         .nest(
             "/task/{task_id}",

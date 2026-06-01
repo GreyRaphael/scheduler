@@ -125,7 +125,7 @@ async fn execute_webhook(task: &Task, timeout: Duration) -> Result<TaskOutput> {
     }
 
     Ok(TaskOutput {
-        exit_code: Some(status as i32),
+        exit_code: Some(0),
         stdout: Some(body),
         stderr: None,
     })
