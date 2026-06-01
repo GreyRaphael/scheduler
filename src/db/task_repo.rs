@@ -14,6 +14,7 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
         description: row.get(2)?,
         trigger_type: TriggerType::from_str(&row.get::<_, String>(3)?).unwrap_or(TriggerType::Cron),
         trigger_expr: row.get(4)?,
+        cron_tz_mode: row.get::<_, Option<String>>(17)?.unwrap_or_else(|| "utc".to_string()),
         action_type: ActionType::from_str(&row.get::<_, String>(5)?).unwrap_or(ActionType::Command),
         action_config: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
         status: TaskStatus::from_str(&row.get::<_, String>(7)?).unwrap_or(TaskStatus::Active),
@@ -45,15 +46,17 @@ pub fn insert_task(conn: &rusqlite::Connection, req: CreateTaskRequest) -> Resul
     let enabled = req.enabled.unwrap_or(true);
     let max_retries = req.max_retries.unwrap_or(0) as i32;
     let timeout = req.timeout_secs.map(|v| v as i64);
+    let cron_tz_mode = req.cron_tz_mode.unwrap_or_else(|| "utc".to_string());
     conn.execute(
-        "INSERT INTO tasks (id, name, description, trigger_type, trigger_expr, action_type, action_config, status, enabled, created_at, updated_at, last_run_status, max_retries, timeout_secs, gotify_token)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        "INSERT INTO tasks (id, name, description, trigger_type, trigger_expr, cron_tz_mode, action_type, action_config, status, enabled, created_at, updated_at, last_run_status, max_retries, timeout_secs, gotify_token)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         rusqlite::params![
             id.to_string(),
             req.name,
             req.description.unwrap_or_default(),
             req.trigger_type.as_str(),
             req.trigger_expr,
+            cron_tz_mode,
             req.action_type.as_str(),
             req.action_config.to_string(),
             TaskStatus::Active.as_str(),
@@ -176,6 +179,11 @@ pub fn update_task(conn: &rusqlite::Connection, id: Uuid, req: UpdateTaskRequest
     if trigger_changed {
         sets.push("next_run_at = NULL".to_string());
     }
+    if let Some(mode) = req.cron_tz_mode {
+        sets.push(format!("cron_tz_mode = ?{idx}"));
+        params.push(Box::new(mode));
+        idx += 1;
+    }
     if let Some(at) = req.action_type {
         sets.push(format!("action_type = ?{idx}"));
         params.push(Box::new(at.as_str().to_string()));
@@ -228,6 +236,15 @@ pub fn set_task_enabled(conn: &rusqlite::Connection, id: Uuid, enabled: bool) ->
         rusqlite::params![enabled as i32, status, now, id.to_string()],
     )?;
     get_task(conn, id)
+}
+
+pub fn clear_task_next_run(conn: &rusqlite::Connection, id: Uuid) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE tasks SET next_run_at = NULL, updated_at = ?1 WHERE id = ?2",
+        rusqlite::params![now, id.to_string()],
+    )?;
+    Ok(())
 }
 
 pub fn update_task_run_info(

@@ -52,6 +52,13 @@ pub fn init_db(db_path: &str) -> Result<DbPool> {
     if !has_unique {
         conn.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_name ON tasks(name)")?;
     }
+    // Migration: add cron_tz_mode column if missing
+    let has_col: bool = conn.prepare("PRAGMA table_info(tasks)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .any(|name| name.as_deref() == Ok("cron_tz_mode"));
+    if !has_col {
+        conn.execute_batch("ALTER TABLE tasks ADD COLUMN cron_tz_mode TEXT NOT NULL DEFAULT 'utc'")?;
+    }
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS execution_history (
             id          TEXT PRIMARY KEY,

@@ -62,9 +62,6 @@
     <div id="page-history" class="page" style="display:none">
         <div class="page-header">
             <h1>Execution History</h1>
-            <label class="auto-refresh-label">
-                <input type="checkbox" id="history-auto-refresh" checked> Auto-refresh
-            </label>
         </div>
         <div class="filters">
             <input type="text" id="history-task-filter" placeholder="Search by task name...">
@@ -94,9 +91,9 @@
             </div>
             <div class="form-group">
                 <label>Description</label>
-                <textarea id="task-description" rows="2"></textarea>
+                <input type="text" id="task-description">
             </div>
-            <div class="form-row">
+            <div class="form-row form-row-3">
                 <div class="form-group">
                     <label>Trigger Type</label>
                     <select id="task-trigger-type" required>
@@ -105,11 +102,19 @@
                         <option value="interval">Interval</option>
                     </select>
                 </div>
-                <div class="form-group">
-                    <label id="trigger-expr-label">Cron Expression</label>
+                <div class="form-group" id="cron-tz-group">
+                    <label>Cron Timezone</label>
+                    <select id="task-cron-tz">
+                        <option value="utc">UTC</option>
+                        <option value="local">Local Time</option>
+                    </select>
+                </div>
+                <div class="form-group" id="trigger-expr-group">
+                    <label id="trigger-expr-label">Expression</label>
                     <input type="text" id="task-trigger-expr" placeholder="0 0 * * * *" required>
                 </div>
             </div>
+            <div id="cron-preview" class="cron-preview" style="display:none"></div>
             <div class="form-group">
                 <label>Action Type</label>
                 <select id="task-action-type" required>
@@ -148,8 +153,8 @@
                 </div>
             </div>
             <div class="form-group">
-                <label>Gotify Token (optional, for push notifications)</label>
-                <input type="text" id="task-gotify-token" placeholder="Leave empty to disable notifications">
+                <label>Gotify Token (optional)</label>
+                <input type="text" id="task-gotify-token" placeholder="Leave empty to disable push notifications">
             </div>
             <div class="form-actions">
                 <button type="button" class="btn btn-outline" id="btn-cancel">Cancel</button>

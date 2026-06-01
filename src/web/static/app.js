@@ -62,19 +62,27 @@ function badge(cls, text) {
     return `<span class="badge badge-${cls}">${text}</span>`;
 }
 
+let tasksAutoRefreshTimer = null;
+let historyAutoRefreshTimer = null;
+
 function navigate(page) {
     currentPage = page;
     document.querySelectorAll('.page').forEach(p => p.style.display = 'none');
     document.querySelectorAll('.nav-links a').forEach(a => a.classList.remove('active'));
     document.getElementById('page-' + page).style.display = 'block';
     document.querySelector(`[data-page="${page}"]`).classList.add('active');
+    clearInterval(tasksAutoRefreshTimer);
+    clearInterval(historyAutoRefreshTimer);
+    tasksAutoRefreshTimer = null;
+    historyAutoRefreshTimer = null;
     if (page === 'dashboard') loadDashboard();
-    else if (page === 'tasks') loadTasks();
+    else if (page === 'tasks') {
+        loadTasks();
+        tasksAutoRefreshTimer = setInterval(() => loadTasks(), 5000);
+    }
     else if (page === 'history') {
         loadHistory();
-        startHistoryAutoRefresh();
-    } else {
-        stopHistoryAutoRefresh();
+        historyAutoRefreshTimer = setInterval(() => loadHistory(), 5000);
     }
 }
 
@@ -151,7 +159,6 @@ async function loadTasks(page) {
 
 let historyPage = 1;
 let historyPerPage = 20;
-let historyAutoRefreshTimer = null;
 
 async function loadHistory(page) {
     if (page) historyPage = page;
@@ -191,28 +198,6 @@ async function loadHistory(page) {
     }
 }
 
-function startHistoryAutoRefresh() {
-    stopHistoryAutoRefresh();
-    if (document.getElementById('history-auto-refresh').checked) {
-        historyAutoRefreshTimer = setInterval(() => loadHistory(), 5000);
-    }
-}
-
-function stopHistoryAutoRefresh() {
-    if (historyAutoRefreshTimer) {
-        clearInterval(historyAutoRefreshTimer);
-        historyAutoRefreshTimer = null;
-    }
-}
-
-function toggleHistoryAutoRefresh() {
-    if (document.getElementById('history-auto-refresh').checked) {
-        startHistoryAutoRefresh();
-    } else {
-        stopHistoryAutoRefresh();
-    }
-}
-
 async function viewTask(id) {
     try {
         const task = await api('/tasks/' + id);
@@ -232,7 +217,7 @@ async function viewTask(id) {
                 <div class="detail-grid">
                     <div class="detail-item"><div class="label">ID</div><div class="val">${task.id}</div></div>
                     <div class="detail-item"><div class="label">Status</div><div class="val">${badge(task.status, task.status)}</div></div>
-                    <div class="detail-item"><div class="label">Trigger</div><div class="val">${task.trigger_type} - <code>${esc(task.trigger_expr)}</code></div></div>
+                    <div class="detail-item"><div class="label">Trigger</div><div class="val">${task.trigger_type} - <code>${esc(task.trigger_expr)}</code>${task.trigger_type === 'cron' && task.cron_tz_mode === 'local' ? ' <span class="badge badge-active">LOCAL</span>' : ''}</div></div>
                     <div class="detail-item"><div class="label">Action</div><div class="val">${task.action_type}</div></div>
                     <div class="detail-item"><div class="label">Enabled</div><div class="val">${task.enabled ? 'Yes' : 'No'}</div></div>
                     <div class="detail-item"><div class="label">Max Retries</div><div class="val">${task.max_retries}</div></div>
@@ -319,7 +304,9 @@ function openNewTaskModal() {
     document.getElementById('task-id').value = '';
     document.getElementById('task-timeout').value = '3600';
     document.getElementById('task-max-retries').value = '0';
+    document.getElementById('task-cron-tz').value = 'utc';
     updateActionConfig();
+    updateTriggerLabel();
     document.getElementById('task-modal').style.display = 'flex';
 }
 
@@ -331,6 +318,7 @@ async function editTask(id) {
         document.getElementById('task-name').value = t.name;
         document.getElementById('task-description').value = t.description;
         document.getElementById('task-trigger-type').value = t.trigger_type;
+        document.getElementById('task-cron-tz').value = t.cron_tz_mode || 'utc';
         document.getElementById('task-trigger-expr').value = t.trigger_expr;
         document.getElementById('task-action-type').value = t.action_type;
         document.getElementById('task-max-retries').value = t.max_retries;
@@ -361,6 +349,17 @@ function updateTriggerLabel() {
     const placeholders = { cron: '0 0 8 * * *', once: '2026-06-01T08:00:00Z', interval: '3600' };
     document.getElementById('trigger-expr-label').textContent = labels[tt];
     document.getElementById('task-trigger-expr').placeholder = placeholders[tt];
+    const tzGroup = document.getElementById('cron-tz-group');
+    const exprGroup = document.getElementById('trigger-expr-group');
+    if (tt === 'cron') {
+        tzGroup.style.display = '';
+        exprGroup.style.gridColumn = '';
+        updateCronPreview();
+    } else {
+        tzGroup.style.display = 'none';
+        exprGroup.style.gridColumn = 'span 2';
+        document.getElementById('cron-preview').style.display = 'none';
+    }
 }
 
 function updateActionConfig() {
@@ -369,9 +368,103 @@ function updateActionConfig() {
     document.getElementById('webhook-config').style.display = at === 'webhook' ? 'block' : 'none';
 }
 
+function parseCronField(field, min, max) {
+    if (field === '*') return null;
+    const vals = new Set();
+    for (const part of field.split(',')) {
+        const stepMatch = part.match(/^(\*|\d+-\d+)\/(\d+)$/);
+        if (stepMatch) {
+            const step = parseInt(stepMatch[2]);
+            let s = min, e = max;
+            if (stepMatch[1] !== '*') {
+                const r = stepMatch[1].split('-');
+                s = parseInt(r[0]); e = parseInt(r[1]);
+            }
+            for (let v = s; v <= e; v += step) vals.add(v);
+            continue;
+        }
+        const rangeMatch = part.match(/^(\d+)-(\d+)$/);
+        if (rangeMatch) {
+            for (let v = parseInt(rangeMatch[1]); v <= parseInt(rangeMatch[2]); v++) vals.add(v);
+            continue;
+        }
+        if (/^\d+$/.test(part)) { vals.add(parseInt(part)); continue; }
+        return null;
+    }
+    return vals;
+}
+
+function cronFieldMatches(field, value, min, max) {
+    if (!field || field === '*') return true;
+    const vals = parseCronField(field, min, max);
+    return vals ? vals.has(value) : false;
+}
+
+function updateCronPreview() {
+    const expr = document.getElementById('task-trigger-expr').value.trim();
+    const preview = document.getElementById('cron-preview');
+    const tzMode = document.getElementById('task-cron-tz').value;
+    if (!expr) { preview.style.display = 'none'; return; }
+    const fields = expr.split(/\s+/);
+    if (fields.length < 5 || fields.length > 6) { preview.style.display = 'none'; return; }
+    const fSec  = fields.length === 6 ? fields[0] : '0';
+    const fMin  = fields.length === 6 ? fields[1] : fields[0];
+    const fHour = fields.length === 6 ? fields[2] : fields[1];
+    const fDom  = fields.length === 6 ? fields[3] : fields[2];
+    const fMon  = fields.length === 6 ? fields[4] : fields[3];
+    const fDow  = fields.length === 6 ? fields[5] : fields[4];
+    const secField  = parseCronField(fSec, 0, 59);
+    const minField  = parseCronField(fMin, 0, 59);
+    const hourField = parseCronField(fHour, 0, 23);
+    const domField  = parseCronField(fDom, 1, 31);
+    const monField  = parseCronField(fMon, 1, 12);
+    const dowField  = parseCronField(fDow, 0, 6);
+    if (secField === null && fSec !== '*' ||
+        minField === null && fMin !== '*' ||
+        hourField === null && fHour !== '*' ||
+        domField === null && fDom !== '*' ||
+        monField === null && fMon !== '*' ||
+        dowField === null && fDow !== '*') {
+        preview.style.display = 'none'; return;
+    }
+    const matches = (sec, min, hour, dom, mon, dow) =>
+        (secField === null ? sec === 0 : secField.has(sec)) &&
+        (minField === null ? true : minField.has(min)) &&
+        (hourField === null ? true : hourField.has(hour)) &&
+        (domField === null ? true : domField.has(dom)) &&
+        (monField === null ? true : monField.has(mon)) &&
+        (dowField === null ? true : dowField.has(dow));
+
+    const useLocal = tzMode === 'local';
+    const now = useLocal ? new Date() : new Date(new Date().toISOString().slice(0, -1) + '+00:00');
+    const start = new Date(now.getTime());
+    start.setSeconds(0, 0);
+    start.setMinutes(start.getMinutes() + 1);
+    const results = [];
+    for (let i = 0; i < 600000 && results.length < 3; i++) {
+        const d = new Date(start.getTime() + i * 60000);
+        const sec = d.getUTCSeconds();
+        const min = useLocal ? d.getMinutes() : d.getUTCMinutes();
+        const hour = useLocal ? d.getHours() : d.getUTCHours();
+        const dom = useLocal ? d.getDate() : d.getUTCDate();
+        const mon = (useLocal ? d.getMonth() : d.getUTCMonth()) + 1;
+        const dow = useLocal ? d.getDay() : d.getUTCDay();
+        if (matches(sec, min, hour, dom, mon, dow)) results.push(d);
+    }
+    if (!results.length) { preview.style.display = 'none'; return; }
+    const tz = tzMode === 'local' ? 'Local' : 'UTC';
+    const lines = results.map(d => {
+        const s = useLocal ? d.toLocaleString() : d.toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
+        return `<div>${s}</div>`;
+    });
+    preview.innerHTML = `<div class="cron-preview-title">Next runs (${tz}):</div>${lines.join('')}`;
+    preview.style.display = 'block';
+}
+
 async function saveTask(e) {
     e.preventDefault();
     const id = document.getElementById('task-id').value;
+    const tt = document.getElementById('task-trigger-type').value;
     const at = document.getElementById('task-action-type').value;
     let actionConfig;
     if (at === 'command') {
@@ -396,13 +489,16 @@ async function saveTask(e) {
     const payload = {
         name: document.getElementById('task-name').value,
         description: document.getElementById('task-description').value,
-        trigger_type: document.getElementById('task-trigger-type').value,
+        trigger_type: tt,
         trigger_expr: document.getElementById('task-trigger-expr').value,
         action_type: at,
         action_config: actionConfig,
         max_retries: parseInt(document.getElementById('task-max-retries').value) || 0,
         timeout_secs: parseInt(document.getElementById('task-timeout').value) || 3600,
     };
+    if (tt === 'cron') {
+        payload.cron_tz_mode = document.getElementById('task-cron-tz').value;
+    }
     if (gotifyToken) payload.gotify_token = gotifyToken;
 
     try {
@@ -494,6 +590,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('task-form').addEventListener('submit', saveTask);
     document.getElementById('task-trigger-type').addEventListener('change', updateTriggerLabel);
     document.getElementById('task-action-type').addEventListener('change', updateActionConfig);
+    document.getElementById('task-trigger-expr').addEventListener('input', updateCronPreview);
+    document.getElementById('task-cron-tz').addEventListener('change', updateCronPreview);
 
     let searchTimer;
     document.getElementById('task-search').addEventListener('input', () => {
@@ -509,7 +607,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         historySearchTimer = setTimeout(() => loadHistory(1), 300);
     });
     document.getElementById('history-status-filter').addEventListener('change', () => loadHistory(1));
-    document.getElementById('history-auto-refresh').addEventListener('change', toggleHistoryAutoRefresh);
 
     document.querySelectorAll('.modal').forEach(m => {
         m.addEventListener('click', e => {

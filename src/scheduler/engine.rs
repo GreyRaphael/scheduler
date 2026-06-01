@@ -2,7 +2,7 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use cron::Schedule;
 use std::str::FromStr;
 use tokio::sync::{mpsc, oneshot};
@@ -144,6 +144,7 @@ impl SchedulerEngine {
                         }));
                     } else if completion.trigger_type == TriggerType::Once {
                         let _ = task_repo::set_task_enabled(&conn, completion.task_id, false);
+                        let _ = task_repo::clear_task_next_run(&conn, completion.task_id);
                         let _ = task_repo::update_task_run_info(
                             &conn,
                             completion.task_id,
@@ -218,7 +219,12 @@ impl SchedulerEngine {
     fn calculate_next_run(&self, task: &Task) -> Option<DateTime<Utc>> {
         match task.trigger_type {
             TriggerType::Cron => {
-                let schedule = Schedule::from_str(&task.trigger_expr).ok()?;
+                let expr = if task.cron_tz_mode == "local" {
+                    convert_cron_to_utc(&task.trigger_expr)
+                } else {
+                    task.trigger_expr.clone()
+                };
+                let schedule = Schedule::from_str(&expr).ok()?;
                 schedule.after(&Utc::now()).next()
             }
             TriggerType::Once => {
@@ -405,7 +411,12 @@ async fn run_task(
 fn calculate_next_run_for_task(task: &Task) -> Option<DateTime<Utc>> {
     match task.trigger_type {
         TriggerType::Cron => {
-            let schedule = Schedule::from_str(&task.trigger_expr).ok()?;
+            let expr = if task.cron_tz_mode == "local" {
+                convert_cron_to_utc(&task.trigger_expr)
+            } else {
+                task.trigger_expr.clone()
+            };
+            let schedule = Schedule::from_str(&expr).ok()?;
             schedule.after(&Utc::now()).next()
         }
         TriggerType::Once => None,
@@ -414,4 +425,50 @@ fn calculate_next_run_for_task(task: &Task) -> Option<DateTime<Utc>> {
             Some(Utc::now() + chrono::Duration::seconds(secs as i64))
         }
     }
+}
+
+fn convert_cron_to_utc(expr: &str) -> String {
+    let offset_secs = -Local::now().offset().utc_minus_local();
+    let offset_hours = offset_secs / 3600;
+    if offset_hours == 0 {
+        return expr.to_string();
+    }
+    let fields: Vec<&str> = expr.split_whitespace().collect();
+    let hour_idx = if fields.len() == 6 { 2 } else { 1 };
+    let mut result: Vec<String> = fields.iter().map(|s| s.to_string()).collect();
+    if result[hour_idx] != "*" {
+        let shifted: Vec<String> = result[hour_idx]
+            .split(',')
+            .map(|part| {
+                if let Some(step_pos) = part.find('/') {
+                    let base = &part[..step_pos];
+                    let step = &part[step_pos..];
+                    if base == "*" {
+                        return format!("*{step}");
+                    }
+                    if let Some(dash_pos) = base.find('-') {
+                        let s: i32 = base[..dash_pos].parse().unwrap_or(0);
+                        let e: i32 = base[dash_pos + 1..].parse().unwrap_or(0);
+                        let ns = ((s - offset_hours) % 24 + 24) % 24;
+                        let ne = ((e - offset_hours) % 24 + 24) % 24;
+                        return format!("{ns}-{ne}{step}");
+                    }
+                    return part.to_string();
+                }
+                if let Some(dash_pos) = part.find('-') {
+                    let s: i32 = part[..dash_pos].parse().unwrap_or(0);
+                    let e: i32 = part[dash_pos + 1..].parse().unwrap_or(0);
+                    let ns = ((s - offset_hours) % 24 + 24) % 24;
+                    let ne = ((e - offset_hours) % 24 + 24) % 24;
+                    return format!("{ns}-{ne}");
+                }
+                if let Ok(h) = part.parse::<i32>() {
+                    return format!("{}", ((h - offset_hours) % 24 + 24) % 24);
+                }
+                part.to_string()
+            })
+            .collect();
+        result[hour_idx] = shifted.join(",");
+    }
+    result.join(" ")
 }
