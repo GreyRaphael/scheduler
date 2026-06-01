@@ -113,6 +113,10 @@ async fn execute_webhook(task: &Task, timeout: Duration) -> Result<TaskOutput> {
     }
 
     if let Some(body) = config.body {
+        let has_ct = config.headers.keys().any(|k| k.eq_ignore_ascii_case("content-type"));
+        if !has_ct {
+            req = req.header("Content-Type", "application/json");
+        }
         req = req.body(body);
     }
 
