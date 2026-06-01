@@ -1,7 +1,6 @@
 mod api;
 mod config;
 mod db;
-mod gotify;
 mod models;
 mod scheduler;
 
@@ -32,17 +31,12 @@ async fn main() -> Result<()> {
         .init();
 
     info!("Starting scheduler on {}", config.listen_addr());
-    if let Some(ref url) = config.gotify_url {
-        info!("Gotify notifications enabled: {}", url);
-    } else {
-        info!("Gotify notifications disabled (no gotify_url configured)");
-    }
 
     let db_path = config.db_path().to_string_lossy().to_string();
     let pool = db::init_db(&db_path)?;
     info!("Database initialized: {db_path}");
 
-    let engine = scheduler::SchedulerEngine::new(pool.clone(), config.gotify_url.clone());
+    let engine = scheduler::SchedulerEngine::new(pool.clone());
     let scheduler_tx = engine.command_sender();
 
     let scheduler_handle = tokio::spawn(async move {

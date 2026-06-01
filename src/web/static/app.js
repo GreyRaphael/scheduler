@@ -126,6 +126,7 @@ async function loadTasks(page) {
                 <td>${badge(t.status, t.status)}</td>
                 <td>${t.trigger_type}</td>
                 <td><code>${esc(t.trigger_expr)}</code></td>
+                <td>${t.command_config ? 'Cmd' : ''}${t.command_config && t.webhook_config ? '+' : ''}${t.webhook_config ? 'WH' : '-'}</td>
                 <td>${t.enabled ? badge('active','ON') : badge('paused','OFF')}</td>
                 <td>${relTime(t.last_run_at)}</td>
                 <td>${lastResult}</td>
@@ -146,7 +147,7 @@ async function loadTasks(page) {
         pagination += '</div>';
         document.getElementById('tasks-table-container').innerHTML = data.items.length ? `
             <table>
-                <thead><tr><th>Name</th><th>Status</th><th>Trigger</th><th>Expression</th><th>Enabled</th><th>Last Run</th><th>Last Result</th><th>Next Run</th><th>Actions</th></tr></thead>
+                <thead><tr><th>Name</th><th>Status</th><th>Trigger</th><th>Expression</th><th>Actions</th><th>Enabled</th><th>Last Run</th><th>Last Result</th><th>Next Run</th><th>Ops</th></tr></thead>
                 <tbody>${rows}</tbody>
             </table>
             ${pagination}
@@ -228,21 +229,18 @@ async function viewTask(id) {
                     <div class="detail-item"><div class="label">ID</div><div class="val">${task.id}</div></div>
                     <div class="detail-item"><div class="label">Status</div><div class="val">${badge(task.status, task.status)}</div></div>
                     <div class="detail-item"><div class="label">Trigger</div><div class="val">${task.trigger_type} - <code>${esc(task.trigger_expr)}</code>${task.trigger_type === 'cron' && task.cron_tz_mode === 'local' ? ' <span class="badge badge-active">LOCAL</span>' : ''}</div></div>
-                    <div class="detail-item"><div class="label">Action</div><div class="val">${task.action_type}</div></div>
+                    <div class="detail-item"><div class="label">Actions</div><div class="val">${task.command_config ? 'Command' : ''}${task.command_config && task.webhook_config ? ' + ' : ''}${task.webhook_config ? 'Webhook' : ''}</div></div>
                     <div class="detail-item"><div class="label">Enabled</div><div class="val">${task.enabled ? 'Yes' : 'No'}</div></div>
                     <div class="detail-item"><div class="label">Max Retries</div><div class="val">${task.max_retries}</div></div>
                     <div class="detail-item"><div class="label">Timeout</div><div class="val">${task.timeout_secs ?? '-'}s</div></div>
-                    <div class="detail-item"><div class="label">Gotify Token</div><div class="val">${task.gotify_token ? '***' : '-'}</div></div>
                     <div class="detail-item"><div class="label">Created</div><div class="val">${formatTime(task.created_at)}</div></div>
                     <div class="detail-item"><div class="label">Last Run</div><div class="val">${formatTime(task.last_run_at)}</div></div>
                     <div class="detail-item"><div class="label">Last Result</div><div class="val">${task.last_run_status ? badge(task.last_run_status === 'success' ? 'success' : 'failed', task.last_run_status) : '-'}</div></div>
                     <div class="detail-item"><div class="label">Next Run</div><div class="val">${formatTime(task.next_run_at)}</div></div>
                 </div>
             </div>
-            <div class="detail-section">
-                <h3>Action Config</h3>
-                <pre class="output-block">${JSON.stringify(task.action_config, null, 2)}</pre>
-            </div>
+            ${task.command_config ? `<div class="detail-section"><h3>Command Config</h3><pre class="output-block">${JSON.stringify(task.command_config, null, 2)}</pre></div>` : ''}
+            ${task.webhook_config ? `<div class="detail-section"><h3>Webhook Config</h3><pre class="output-block">${JSON.stringify(task.webhook_config, null, 2)}</pre></div>` : ''}
             <div class="detail-section">
                 <h3>Recent Runs</h3>
                 ${hRows.length ? `<table><thead><tr><th>Status</th><th>Started</th><th>Finished</th><th>Exit</th></tr></thead><tbody>${hRows}</tbody></table>` : '<div class="empty-state">No runs yet</div>'}
@@ -315,7 +313,6 @@ function openNewTaskModal() {
     document.getElementById('task-timeout').value = '3600';
     document.getElementById('task-max-retries').value = '0';
     document.getElementById('task-cron-tz').value = 'utc';
-    updateActionConfig();
     updateTriggerLabel();
     document.getElementById('task-modal').style.display = 'flex';
 }
@@ -330,22 +327,26 @@ async function editTask(id) {
         document.getElementById('task-trigger-type').value = t.trigger_type;
         document.getElementById('task-cron-tz').value = t.cron_tz_mode || 'utc';
         document.getElementById('task-trigger-expr').value = t.trigger_expr;
-        document.getElementById('task-action-type').value = t.action_type;
         document.getElementById('task-max-retries').value = t.max_retries;
         document.getElementById('task-timeout').value = t.timeout_secs ?? 3600;
-        document.getElementById('task-gotify-token').value = t.gotify_token || '';
         updateTriggerLabel();
-        updateActionConfig();
-        if (t.action_type === 'command') {
-            const c = t.action_config;
-            document.getElementById('task-program').value = c.program || '';
-            document.getElementById('task-args').value = (c.args || []).join('\n');
-            document.getElementById('task-workdir').value = c.working_dir || '';
-        } else if (t.action_type === 'webhook') {
-            const w = t.action_config;
-            document.getElementById('task-webhook-url').value = w.url || '';
-            document.getElementById('task-webhook-method').value = w.method || 'GET';
-            document.getElementById('task-webhook-body').value = w.body || '';
+        if (t.command_config) {
+            document.getElementById('task-program').value = t.command_config.program || '';
+            document.getElementById('task-args').value = (t.command_config.args || []).join('\n');
+            document.getElementById('task-workdir').value = t.command_config.working_dir || '';
+        } else {
+            document.getElementById('task-program').value = '';
+            document.getElementById('task-args').value = '';
+            document.getElementById('task-workdir').value = '';
+        }
+        if (t.webhook_config) {
+            document.getElementById('task-webhook-url').value = t.webhook_config.url || '';
+            document.getElementById('task-webhook-method').value = t.webhook_config.method || 'GET';
+            document.getElementById('task-webhook-body').value = t.webhook_config.body || '';
+        } else {
+            document.getElementById('task-webhook-url').value = '';
+            document.getElementById('task-webhook-method').value = 'GET';
+            document.getElementById('task-webhook-body').value = '';
         }
         document.getElementById('task-modal').style.display = 'flex';
     } catch (e) {
@@ -370,12 +371,6 @@ function updateTriggerLabel() {
         exprGroup.style.gridColumn = 'span 2';
         document.getElementById('cron-preview').style.display = 'none';
     }
-}
-
-function updateActionConfig() {
-    const at = document.getElementById('task-action-type').value;
-    document.getElementById('command-config').style.display = at === 'command' ? 'block' : 'none';
-    document.getElementById('webhook-config').style.display = at === 'webhook' ? 'block' : 'none';
 }
 
 function parseCronField(field, min, max) {
@@ -475,41 +470,42 @@ async function saveTask(e) {
     e.preventDefault();
     const id = document.getElementById('task-id').value;
     const tt = document.getElementById('task-trigger-type').value;
-    const at = document.getElementById('task-action-type').value;
-    let actionConfig;
-    if (at === 'command') {
+
+    // Build command_config
+    const program = document.getElementById('task-program').value.trim();
+    let commandConfig = null;
+    if (program) {
         const args = document.getElementById('task-args').value.split('\n').filter(s => s.trim());
         const workdir = document.getElementById('task-workdir').value.trim();
-        actionConfig = {
-            program: document.getElementById('task-program').value,
-            args,
-            env: {},
-        };
-        if (workdir) actionConfig.working_dir = workdir;
-    } else {
-        const body = document.getElementById('task-webhook-body').value.trim();
-        actionConfig = {
-            url: document.getElementById('task-webhook-url').value,
-            method: document.getElementById('task-webhook-method').value,
-        };
-        if (body) actionConfig.body = body;
+        commandConfig = { program, args, env: {} };
+        if (workdir) commandConfig.working_dir = workdir;
     }
 
-    const gotifyToken = document.getElementById('task-gotify-token').value.trim();
+    // Build webhook_config
+    const webhookUrl = document.getElementById('task-webhook-url').value.trim();
+    let webhookConfig = null;
+    if (webhookUrl) {
+        const body = document.getElementById('task-webhook-body').value.trim();
+        webhookConfig = {
+            url: webhookUrl,
+            method: document.getElementById('task-webhook-method').value,
+        };
+        if (body) webhookConfig.body = body;
+    }
+
     const payload = {
         name: document.getElementById('task-name').value,
         description: document.getElementById('task-description').value,
         trigger_type: tt,
         trigger_expr: document.getElementById('task-trigger-expr').value,
-        action_type: at,
-        action_config: actionConfig,
         max_retries: parseInt(document.getElementById('task-max-retries').value) || 0,
         timeout_secs: parseInt(document.getElementById('task-timeout').value) || 3600,
     };
+    if (commandConfig) payload.command_config = commandConfig;
+    if (webhookConfig) payload.webhook_config = webhookConfig;
     if (tt === 'cron') {
         payload.cron_tz_mode = document.getElementById('task-cron-tz').value;
     }
-    if (gotifyToken) payload.gotify_token = gotifyToken;
 
     try {
         if (id) {
@@ -599,9 +595,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('detail-modal-close').addEventListener('click', () => document.getElementById('detail-modal').style.display = 'none');
     document.getElementById('task-form').addEventListener('submit', saveTask);
     document.getElementById('task-trigger-type').addEventListener('change', updateTriggerLabel);
-    document.getElementById('task-action-type').addEventListener('change', updateActionConfig);
     document.getElementById('task-trigger-expr').addEventListener('input', updateCronPreview);
     document.getElementById('task-cron-tz').addEventListener('change', updateCronPreview);
+
+    document.getElementById('task-webhook-url').addEventListener('focus', function() {
+        if (!this.value && this.placeholder) this.value = this.placeholder;
+    });
+
+    document.getElementById('task-webhook-body').addEventListener('focus', function() {
+        if (!this.value && this.placeholder) this.value = this.placeholder;
+    });
 
     let searchTimer;
     document.getElementById('task-search').addEventListener('input', () => {

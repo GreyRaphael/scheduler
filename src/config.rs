@@ -9,7 +9,6 @@ struct FileConfig {
     db: Option<String>,
     token: Option<String>,
     log_level: Option<String>,
-    gotify_url: Option<String>,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -32,9 +31,6 @@ pub struct Config {
 
     #[arg(long, env = "SCHEDULER_DEFAULT_TIMEOUT")]
     pub default_timeout: Option<u64>,
-
-    #[arg(long, env = "SCHEDULER_GOTIFY_URL")]
-    pub gotify_url: Option<String>,
 
     #[arg(long, env = "SCHEDULER_CONFIG", default_value = "config.toml")]
     pub config: PathBuf,
@@ -69,10 +65,6 @@ impl Config {
         let max_history = cli.max_history.unwrap_or(1000);
         let default_timeout = cli.default_timeout.unwrap_or(3600);
 
-        let gotify_url = cli.gotify_url
-            .or(file_cfg.gotify_url)
-            .filter(|s| !s.is_empty());
-
         Config {
             listen: Some(listen),
             db: Some(db),
@@ -80,7 +72,6 @@ impl Config {
             log_level: Some(log_level),
             max_history: Some(max_history),
             default_timeout: Some(default_timeout),
-            gotify_url,
             config: cli.config,
         }
     }

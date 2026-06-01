@@ -220,14 +220,19 @@ export SCHEDULER_TOKEN=mytoken
 
 ## 动作类型详解
 
+每个任务可以同时配置 **Command** 和 **Webhook**，两者都是可选的（至少填一个）：
+
+- **只填 Command** → 仅执行命令
+- **只填 Webhook** → 仅发送 HTTP 请求
+- **都填** → 先执行 Command，再发送 Webhook
+
 ### Command（执行命令）
 
 通过系统 Shell 执行命令（Linux/macOS 使用 `sh -c`，Windows 使用 `cmd /C`）。
 
 ```json
 {
-  "action_type": "command",
-  "action_config": {
+  "command_config": {
     "program": "python",
     "args": ["script.py", "--verbose"],
     "env": {"API_KEY": "secret"},
@@ -245,12 +250,11 @@ export SCHEDULER_TOKEN=mytoken
 
 ### Webhook（HTTP 请求）
 
-发送 HTTP 请求到指定 URL。
+发送 HTTP 请求到指定 URL。可用于调用 API、触发 Gotify 推送等。
 
 ```json
 {
-  "action_type": "webhook",
-  "action_config": {
+  "webhook_config": {
     "url": "https://api.example.com/webhook",
     "method": "POST",
     "headers": {"Content-Type": "application/json"},
@@ -264,9 +268,39 @@ export SCHEDULER_TOKEN=mytoken
 | `url` | string | 是 | 目标 URL |
 | `method` | string | 否 | HTTP 方法，默认 `GET` |
 | `headers` | object | 否 | 自定义请求头 |
-| `body` | string | 否 | 请求体 |
+| `body` | string | 否 | 请求体（自动添加 `Content-Type: application/json`） |
 
-> **注意**：HTTP 状态码 >= 400 时任务视为失败。
+> **注意**：HTTP 状态码 >= 400 时任务视为失败。如果未手动设置 `Content-Type`，当有 body 时会自动添加 `application/json`。
+
+### Webhook 模板变量
+
+当 Command + Webhook 同时配置时，webhook body 支持以下模板变量，执行时自动替换：
+
+| 变量 | 说明 |
+|---|---|
+| `{{task_name}}` | 任务名称 |
+| `{{status}}` | Command 执行结果：`success` / `failed` |
+| `{{exit_code}}` | Command 返回码（如 `0`、`1`） |
+| `{{stdout}}` | Command 标准输出 |
+| `{{stderr}}` | Command 标准错误输出 |
+
+**示例 — 执行命令后将结果发送到 Gotify：**
+
+```json
+{
+  "name": "backup-with-notify",
+  "trigger_type": "cron",
+  "trigger_expr": "0 0 2 * * *",
+  "command_config": {
+    "program": "/usr/local/bin/backup.sh"
+  },
+  "webhook_config": {
+    "url": "http://gotify:8080/message?token=MyToken",
+    "method": "POST",
+    "body": "{\"title\":\"{{task_name}}\",\"message\":\"Status: {{status}}, Exit: {{exit_code}}\",\"priority\":5}"
+  }
+}
+```
 
 ---
 
@@ -279,12 +313,11 @@ export SCHEDULER_TOKEN=mytoken
 | `trigger_type` | string | — | `cron` / `once` / `interval` |
 | `trigger_expr` | string | — | 触发表达式（见上文） |
 | `cron_tz_mode` | string | `utc` | Cron 时区模式：`utc` / `local`（仅 trigger_type=cron 时生效） |
-| `action_type` | string | — | `command` / `webhook` |
-| `action_config` | object | — | 动作配置（见上文） |
+| `command_config` | object | — | Command 配置（见上文，与 webhook_config 至少填一个） |
+| `webhook_config` | object | — | Webhook 配置（见上文，与 command_config 至少填一个） |
 | `enabled` | bool | `true` | 是否启用 |
 | `max_retries` | u32 | `0` | 失败后最大重试次数 |
 | `timeout_secs` | u64 | `3600` | 执行超时（秒） |
-| `gotify_token` | string | — | Gotify 推送 Token（留空不推送） |
 
 ---
 
@@ -329,10 +362,14 @@ curl -X POST http://localhost:7070/api/v1/tasks \
     "name": "daily-report",
     "trigger_type": "cron",
     "trigger_expr": "0 0 9 * * *",
-    "action_type": "command",
-    "action_config": {
+    "command_config": {
       "program": "python",
       "args": ["generate_report.py"]
+    },
+    "webhook_config": {
+      "url": "http://gotify:8080/message?token=xxx",
+      "method": "POST",
+      "body": "{\"title\":\"Report\",\"message\":\"Daily report generated\",\"priority\":5}"
     },
     "timeout_secs": 600,
     "max_retries": 2
@@ -362,14 +399,6 @@ curl -X POST http://localhost:7070/api/v1/tasks \
 |---|---|---|
 | `GET` | `/api/v1/auth/check` | 检查是否需要认证 |
 | `POST` | `/api/v1/auth/login` | 登录（获取 Token） |
-
----
-
-## Gotify 推送通知
-
-配置 `gotify_url` 后，任务执行完毕会自动发送通知。每个任务可单独配置 `gotify_token` 以区分不同的通知通道。
-
-未配置 `gotify_token` 的任务不会触发推送。
 
 ---
 

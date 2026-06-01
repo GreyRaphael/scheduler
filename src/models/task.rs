@@ -31,30 +31,6 @@ impl TriggerType {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
-pub enum ActionType {
-    Command,
-    Webhook,
-}
-
-impl ActionType {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            ActionType::Command => "command",
-            ActionType::Webhook => "webhook",
-        }
-    }
-
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "command" => Some(ActionType::Command),
-            "webhook" => Some(ActionType::Webhook),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
     Active,
     Paused,
@@ -91,8 +67,8 @@ pub struct Task {
     pub trigger_type: TriggerType,
     pub trigger_expr: String,
     pub cron_tz_mode: String,
-    pub action_type: ActionType,
-    pub action_config: serde_json::Value,
+    pub command_config: Option<serde_json::Value>,
+    pub webhook_config: Option<serde_json::Value>,
     pub status: TaskStatus,
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
@@ -102,7 +78,6 @@ pub struct Task {
     pub next_run_at: Option<DateTime<Utc>>,
     pub max_retries: u32,
     pub timeout_secs: Option<u64>,
-    pub gotify_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -112,12 +87,11 @@ pub struct CreateTaskRequest {
     pub trigger_type: TriggerType,
     pub trigger_expr: String,
     pub cron_tz_mode: Option<String>,
-    pub action_type: ActionType,
-    pub action_config: serde_json::Value,
+    pub command_config: Option<serde_json::Value>,
+    pub webhook_config: Option<serde_json::Value>,
     pub enabled: Option<bool>,
     pub max_retries: Option<u32>,
     pub timeout_secs: Option<u64>,
-    pub gotify_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -127,12 +101,11 @@ pub struct UpdateTaskRequest {
     pub trigger_type: Option<TriggerType>,
     pub trigger_expr: Option<String>,
     pub cron_tz_mode: Option<String>,
-    pub action_type: Option<ActionType>,
-    pub action_config: Option<serde_json::Value>,
+    pub command_config: Option<serde_json::Value>,
+    pub webhook_config: Option<serde_json::Value>,
     pub enabled: Option<bool>,
     pub max_retries: Option<u32>,
     pub timeout_secs: Option<u64>,
-    pub gotify_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

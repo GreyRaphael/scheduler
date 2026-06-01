@@ -118,31 +118,30 @@
             </div>
             <div id="cron-preview" class="cron-preview" style="display:none"></div>
             <div class="form-group">
-                <label>Action Type</label>
-                <select id="task-action-type" required>
-                    <option value="command">Command</option>
-                    <option value="webhook">Webhook</option>
-                </select>
-            </div>
-            <div id="command-config" class="form-group">
                 <label>Command</label>
-                <input type="text" id="task-program" placeholder="e.g., python">
+                <input type="text" id="task-program" placeholder="e.g., python (leave empty to skip)">
                 <label>Arguments (one per line)</label>
                 <textarea id="task-args" rows="2" placeholder="script.py&#10;--verbose"></textarea>
                 <label>Working Directory</label>
                 <input type="text" id="task-workdir" placeholder="/path/to/dir">
             </div>
-            <div id="webhook-config" class="form-group" style="display:none">
-                <label>URL</label>
-                <input type="text" id="task-webhook-url" placeholder="https://example.com/webhook">
-                <label>Method</label>
-                <select id="task-webhook-method">
-                    <option value="GET">GET</option>
-                    <option value="POST">POST</option>
-                    <option value="PUT">PUT</option>
-                </select>
-                <label>Body(json)</label>
-                <textarea id="task-webhook-body" rows="2" placeholder='{"key":"value"}'></textarea>
+            <div class="form-group">
+                <label>Webhook URL</label>
+                <input type="text" id="task-webhook-url" placeholder="http://your_gotify_server:8080/message?token=YOUR_TOKEN (leave empty to skip)">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Method</label>
+                        <select id="task-webhook-method">
+                            <option value="POST">POST</option>
+                            <option value="GET">GET</option>
+                            <option value="PUT">PUT</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Body</label>
+                        <textarea id="task-webhook-body" rows="3" placeholder='{"title":"{{task_name}}","message":"Status: {{status}}, Code: {{exit_code}}\nStderr: {{stderr}}\nStdout: {{stdout}}","priority":5}'></textarea>
+                    </div>
+                </div>
             </div>
             <div class="form-row">
                 <div class="form-group">
@@ -153,10 +152,6 @@
                     <label>Timeout (seconds)</label>
                     <input type="number" id="task-timeout" value="3600" min="0">
                 </div>
-            </div>
-            <div class="form-group">
-                <label>Gotify Token (optional)</label>
-                <input type="text" id="task-gotify-token" placeholder="Leave empty to disable push notifications">
             </div>
             <div class="form-actions">
                 <button type="button" class="btn btn-outline" id="btn-cancel">Cancel</button>

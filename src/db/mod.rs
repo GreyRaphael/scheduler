@@ -17,8 +17,8 @@ pub fn init_db(db_path: &str) -> Result<DbPool> {
             description     TEXT DEFAULT '',
             trigger_type    TEXT NOT NULL,
             trigger_expr    TEXT NOT NULL,
-            action_type     TEXT NOT NULL,
-            action_config   TEXT NOT NULL,
+            command_config  TEXT,
+            webhook_config  TEXT,
             status          TEXT NOT NULL DEFAULT 'active',
             enabled         INTEGER NOT NULL DEFAULT 1,
             created_at      TEXT NOT NULL,
@@ -28,37 +28,93 @@ pub fn init_db(db_path: &str) -> Result<DbPool> {
             next_run_at     TEXT,
             max_retries     INTEGER NOT NULL DEFAULT 0,
             timeout_secs    INTEGER,
-            gotify_token    TEXT
+            cron_tz_mode    TEXT NOT NULL DEFAULT 'utc'
         )",
     )?;
-    // Migration: add last_run_status column if missing
-    let has_col: bool = conn.prepare("PRAGMA table_info(tasks)")?
+
+    // Migration: check if old schema (has action_type column)
+    let has_action_type: bool = conn.prepare("PRAGMA table_info(tasks)")?
         .query_map([], |row| row.get::<_, String>(1))?
-        .any(|name| name.as_deref() == Ok("last_run_status"));
-    if !has_col {
-        conn.execute_batch("ALTER TABLE tasks ADD COLUMN last_run_status TEXT")?;
+        .any(|name| name.as_deref() == Ok("action_type"));
+
+    if has_action_type {
+        // Migrate: add new columns, copy data, recreate table
+        let has_cmd: bool = conn.prepare("PRAGMA table_info(tasks)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .any(|name| name.as_deref() == Ok("command_config"));
+        if !has_cmd {
+            conn.execute_batch("ALTER TABLE tasks ADD COLUMN command_config TEXT")?;
+        }
+        let has_wh: bool = conn.prepare("PRAGMA table_info(tasks)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .any(|name| name.as_deref() == Ok("webhook_config"));
+        if !has_wh {
+            conn.execute_batch("ALTER TABLE tasks ADD COLUMN webhook_config TEXT")?;
+        }
+
+        // Migrate existing data
+        {
+            let mut stmt = conn.prepare("SELECT id, action_type, action_config, gotify_token FROM tasks")?;
+            let rows: Vec<(String, String, String, Option<String>)> = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })?.collect::<Result<Vec<_>, _>>()?;
+
+            for (id, action_type, action_config, gotify_token) in rows {
+                let (final_cmd, final_wh) = match action_type.as_str() {
+                    "command" => (Some(action_config.clone()), gotify_token_webhook(&gotify_token)),
+                    _ => (None, Some(action_config.clone())),
+                };
+                conn.execute(
+                    "UPDATE tasks SET command_config = ?1, webhook_config = ?2 WHERE id = ?3",
+                    rusqlite::params![final_cmd, final_wh, id],
+                )?;
+            }
+        }
+
+        // Recreate table without old columns
+        conn.execute_batch("
+            CREATE TABLE tasks_new (
+                id              TEXT PRIMARY KEY,
+                name            TEXT NOT NULL UNIQUE,
+                description     TEXT DEFAULT '',
+                trigger_type    TEXT NOT NULL,
+                trigger_expr    TEXT NOT NULL,
+                command_config  TEXT,
+                webhook_config  TEXT,
+                status          TEXT NOT NULL DEFAULT 'active',
+                enabled         INTEGER NOT NULL DEFAULT 1,
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL,
+                last_run_at     TEXT,
+                last_run_status TEXT,
+                next_run_at     TEXT,
+                max_retries     INTEGER NOT NULL DEFAULT 0,
+                timeout_secs    INTEGER,
+                cron_tz_mode    TEXT NOT NULL DEFAULT 'utc'
+            )
+        ")?;
+        conn.execute_batch("
+            INSERT INTO tasks_new (id, name, description, trigger_type, trigger_expr, command_config, webhook_config, status, enabled, created_at, updated_at, last_run_at, last_run_status, next_run_at, max_retries, timeout_secs, cron_tz_mode)
+            SELECT id, name, description, trigger_type, trigger_expr, command_config, webhook_config, status, enabled, created_at, updated_at, last_run_at, last_run_status, next_run_at, max_retries, timeout_secs, COALESCE(cron_tz_mode, 'utc')
+            FROM tasks
+        ")?;
+        conn.execute_batch("DROP TABLE tasks")?;
+        conn.execute_batch("ALTER TABLE tasks_new RENAME TO tasks")?;
+    } else {
+        // New schema already, ensure UNIQUE on name
+        let has_unique: bool = conn.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'")?
+            .query_row([], |row| row.get::<_, String>(0))?
+            .contains("UNIQUE");
+        if !has_unique {
+            conn.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_name ON tasks(name)")?;
+        }
     }
-    // Migration: add gotify_token column if missing
-    let has_col: bool = conn.prepare("PRAGMA table_info(tasks)")?
-        .query_map([], |row| row.get::<_, String>(1))?
-        .any(|name| name.as_deref() == Ok("gotify_token"));
-    if !has_col {
-        conn.execute_batch("ALTER TABLE tasks ADD COLUMN gotify_token TEXT")?;
-    }
-    // Migration: add UNIQUE constraint on name if missing
-    let has_unique: bool = conn.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'")?
-        .query_row([], |row| row.get::<_, String>(0))?
-        .contains("UNIQUE");
-    if !has_unique {
-        conn.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_name ON tasks(name)")?;
-    }
-    // Migration: add cron_tz_mode column if missing
-    let has_col: bool = conn.prepare("PRAGMA table_info(tasks)")?
-        .query_map([], |row| row.get::<_, String>(1))?
-        .any(|name| name.as_deref() == Ok("cron_tz_mode"));
-    if !has_col {
-        conn.execute_batch("ALTER TABLE tasks ADD COLUMN cron_tz_mode TEXT NOT NULL DEFAULT 'utc'")?;
-    }
+
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS execution_history (
             id          TEXT PRIMARY KEY,
@@ -78,4 +134,18 @@ pub fn init_db(db_path: &str) -> Result<DbPool> {
          CREATE INDEX IF NOT EXISTS idx_history_started ON execution_history(started_at);",
     )?;
     Ok(Arc::new(Mutex::new(conn)))
+}
+
+fn gotify_token_webhook(token: &Option<String>) -> Option<String> {
+    token.as_ref().filter(|t| !t.is_empty()).map(|t| {
+        serde_json::json!({
+            "url": format!("http://localhost:8080/message?token={}", t),
+            "method": "POST",
+            "body": serde_json::json!({
+                "title": "{{task_name}}",
+                "message": "Task {{status}}",
+                "priority": 5
+            }).to_string()
+        }).to_string()
+    })
 }

@@ -10,7 +10,6 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::db::{history_repo, task_repo, DbPool};
-use crate::gotify;
 use crate::models::{RunStatus, Task, TaskStatus, TriggerType};
 use crate::scheduler::executor;
 
@@ -61,17 +60,15 @@ pub struct SchedulerEngine {
     pool: DbPool,
     cmd_tx: mpsc::Sender<SchedulerCommand>,
     cmd_rx: mpsc::Receiver<SchedulerCommand>,
-    gotify_url: Option<String>,
 }
 
 impl SchedulerEngine {
-    pub fn new(pool: DbPool, gotify_url: Option<String>) -> Self {
+    pub fn new(pool: DbPool) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel(64);
         Self {
             pool,
             cmd_tx,
             cmd_rx,
-            gotify_url,
         }
     }
 
@@ -111,10 +108,9 @@ impl SchedulerEngine {
                         }
                         SchedulerCommand::TriggerNow(task_id, reply) => {
                             let pool = self.pool.clone();
-                            let gotify_url = self.gotify_url.clone();
                             let tx = completion_tx.clone();
                             tokio::spawn(async move {
-                                let result = run_task(pool, gotify_url, task_id, true).await;
+                                let result = run_task(pool, task_id, true).await;
                                 if let Some(comp) = result {
                                     let _ = tx.send(comp).await;
                                 }
@@ -167,10 +163,9 @@ impl SchedulerEngine {
                     if let Some(Reverse(entry)) = heap.pop() {
                         if entry.next_run <= Utc::now() {
                             let pool = self.pool.clone();
-                            let gotify_url = self.gotify_url.clone();
                             let tx = completion_tx.clone();
                             tokio::spawn(async move {
-                                if let Some(comp) = run_task(pool, gotify_url, entry.task_id, false).await {
+                                if let Some(comp) = run_task(pool, entry.task_id, false).await {
                                     let _ = tx.send(comp).await;
                                 }
                             });
@@ -202,10 +197,10 @@ impl SchedulerEngine {
             let next = task.next_run_at
                 .filter(|t| *t > Utc::now())
                 .or_else(|| self.calculate_next_run(&task));
-        if let Some(next) = next {
-            if task.next_run_at != Some(next) {
-                let _ = task_repo::update_task_run_info(&conn, task.id, None, Some(next), None, None);
-            }
+            if let Some(next) = next {
+                if task.next_run_at != Some(next) {
+                    let _ = task_repo::update_task_run_info(&conn, task.id, None, Some(next), None, None);
+                }
                 heap.push(Reverse(ScheduleEntry {
                     next_run: next,
                     task_id: task.id,
@@ -246,7 +241,6 @@ impl SchedulerEngine {
 
 async fn run_task(
     pool: DbPool,
-    gotify_url: Option<String>,
     task_id: Uuid,
     is_manual: bool,
 ) -> Option<TaskCompletion> {
@@ -281,7 +275,6 @@ async fn run_task(
     info!("Executing task '{}' ({task_id})", task_name);
 
     let mut success = false;
-    let mut last_exit_code: Option<i32> = None;
 
     for attempt in 0..=max_retries {
         if attempt > 0 {
@@ -318,7 +311,6 @@ async fn run_task(
             match result {
                 Ok(output) => {
                     let failed = output.exit_code.is_some_and(|c| c != 0);
-                    last_exit_code = output.exit_code;
                     let run_status = if failed { RunStatus::Failed } else { RunStatus::Success };
                     let error_msg = if failed {
                         Some(format!("Command exited with code {}", output.exit_code.unwrap_or(-1)))
@@ -384,17 +376,6 @@ async fn run_task(
 
         calculate_next_run_for_task(&task)
     };
-
-    // Send Gotify notification (outside DB lock)
-    if let Some(ref url) = gotify_url {
-        gotify::notify_task_result(
-            Some(url),
-            task.gotify_token.as_deref(),
-            &task_name,
-            success,
-            last_exit_code,
-        ).await;
-    }
 
     if is_manual {
         info!("Manual task '{}' completed", task_name);

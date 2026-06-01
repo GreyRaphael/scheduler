@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::models::{
-    ActionType, CreateTaskRequest, PagedResult, Task, TaskFilter, TaskStatus, TriggerType,
+    CreateTaskRequest, PagedResult, Task, TaskFilter, TaskStatus, TriggerType,
     UpdateTaskRequest,
 };
 
@@ -14,9 +14,10 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
         description: row.get(2)?,
         trigger_type: TriggerType::from_str(&row.get::<_, String>(3)?).unwrap_or(TriggerType::Cron),
         trigger_expr: row.get(4)?,
-        cron_tz_mode: row.get::<_, Option<String>>(17)?.unwrap_or_else(|| "utc".to_string()),
-        action_type: ActionType::from_str(&row.get::<_, String>(5)?).unwrap_or(ActionType::Command),
-        action_config: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
+        command_config: row.get::<_, Option<String>>(5)?
+            .and_then(|s| serde_json::from_str(&s).ok()),
+        webhook_config: row.get::<_, Option<String>>(6)?
+            .and_then(|s| serde_json::from_str(&s).ok()),
         status: TaskStatus::from_str(&row.get::<_, String>(7)?).unwrap_or(TaskStatus::Active),
         enabled: row.get::<_, i32>(8)? != 0,
         created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(9)?)
@@ -36,7 +37,7 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
             .map(|dt| dt.with_timezone(&Utc)),
         max_retries: row.get::<_, i64>(14)? as u32,
         timeout_secs: row.get::<_, Option<i64>>(15)?.map(|v| v as u64),
-        gotify_token: row.get(16)?,
+        cron_tz_mode: row.get::<_, Option<String>>(16)?.unwrap_or_else(|| "utc".to_string()),
     })
 }
 
@@ -47,18 +48,19 @@ pub fn insert_task(conn: &rusqlite::Connection, req: CreateTaskRequest) -> Resul
     let max_retries = req.max_retries.unwrap_or(0) as i32;
     let timeout = req.timeout_secs.map(|v| v as i64);
     let cron_tz_mode = req.cron_tz_mode.unwrap_or_else(|| "utc".to_string());
+    let cmd = req.command_config.map(|v| v.to_string());
+    let wh = req.webhook_config.map(|v| v.to_string());
     conn.execute(
-        "INSERT INTO tasks (id, name, description, trigger_type, trigger_expr, cron_tz_mode, action_type, action_config, status, enabled, created_at, updated_at, last_run_status, max_retries, timeout_secs, gotify_token)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+        "INSERT INTO tasks (id, name, description, trigger_type, trigger_expr, command_config, webhook_config, status, enabled, created_at, updated_at, last_run_status, max_retries, timeout_secs, cron_tz_mode)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         rusqlite::params![
             id.to_string(),
             req.name,
             req.description.unwrap_or_default(),
             req.trigger_type.as_str(),
             req.trigger_expr,
-            cron_tz_mode,
-            req.action_type.as_str(),
-            req.action_config.to_string(),
+            cmd,
+            wh,
             TaskStatus::Active.as_str(),
             enabled as i32,
             now,
@@ -66,7 +68,7 @@ pub fn insert_task(conn: &rusqlite::Connection, req: CreateTaskRequest) -> Resul
             None::<String>,
             max_retries,
             timeout,
-            req.gotify_token,
+            cron_tz_mode,
         ],
     )?;
     get_task(conn, id)?.ok_or_else(|| anyhow::anyhow!("Failed to retrieve created task"))
@@ -184,14 +186,14 @@ pub fn update_task(conn: &rusqlite::Connection, id: Uuid, req: UpdateTaskRequest
         params.push(Box::new(mode));
         idx += 1;
     }
-    if let Some(at) = req.action_type {
-        sets.push(format!("action_type = ?{idx}"));
-        params.push(Box::new(at.as_str().to_string()));
+    if let Some(cmd) = req.command_config {
+        sets.push(format!("command_config = ?{idx}"));
+        params.push(Box::new(if cmd.is_null() { None::<String> } else { Some(cmd.to_string()) }));
         idx += 1;
     }
-    if let Some(config) = req.action_config {
-        sets.push(format!("action_config = ?{idx}"));
-        params.push(Box::new(config.to_string()));
+    if let Some(wh) = req.webhook_config {
+        sets.push(format!("webhook_config = ?{idx}"));
+        params.push(Box::new(if wh.is_null() { None::<String> } else { Some(wh.to_string()) }));
         idx += 1;
     }
     if let Some(enabled) = req.enabled {
@@ -207,11 +209,6 @@ pub fn update_task(conn: &rusqlite::Connection, id: Uuid, req: UpdateTaskRequest
     if let Some(timeout) = req.timeout_secs {
         sets.push(format!("timeout_secs = ?{idx}"));
         params.push(Box::new(timeout as i64));
-        idx += 1;
-    }
-    if let Some(token) = req.gotify_token {
-        sets.push(format!("gotify_token = ?{idx}"));
-        params.push(Box::new(token));
         idx += 1;
     }
 
