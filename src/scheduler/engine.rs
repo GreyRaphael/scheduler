@@ -428,11 +428,19 @@ fn calculate_next_run_for_task(task: &Task) -> Option<DateTime<Utc>> {
         }
         TriggerType::Interval => {
             let secs: u64 = task.trigger_expr.parse().ok()?;
+            let duration = chrono::Duration::seconds(secs as i64);
             if task.interval_mode == "fixed_rate" {
                 let base = task.next_run_at.unwrap_or_else(Utc::now);
-                Some(base + chrono::Duration::seconds(secs as i64))
+                let mut next = base + duration;
+                // If the computed next time is in the past, advance to the nearest future-aligned point
+                let now = Utc::now();
+                while next <= now {
+                    next = next + duration;
+                }
+                Some(next)
             } else {
-                Some(Utc::now() + chrono::Duration::seconds(secs as i64))
+                // fixed_delay: start counting from now
+                Some(Utc::now() + duration)
             }
         }
     }

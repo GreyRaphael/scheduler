@@ -7,6 +7,11 @@ use crate::models::{
     UpdateTaskRequest,
 };
 
+const TASK_COLUMNS: &str = "id, name, description, trigger_type, trigger_expr, \
+    command_config, webhook_config, status, enabled, created_at, updated_at, \
+    last_run_at, last_run_status, next_run_at, max_retries, timeout_secs, \
+    cron_tz_mode, interval_mode";
+
 fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
     Ok(Task {
         id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or_default(),
@@ -78,7 +83,8 @@ pub fn insert_task(conn: &rusqlite::Connection, req: CreateTaskRequest) -> Resul
 }
 
 pub fn get_task(conn: &rusqlite::Connection, id: Uuid) -> Result<Option<Task>> {
-    let mut stmt = conn.prepare("SELECT * FROM tasks WHERE id = ?1")?;
+    let sql = format!("SELECT {TASK_COLUMNS} FROM tasks WHERE id = ?1");
+    let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt.query_map([id.to_string()], row_to_task)?;
     match rows.next() {
         Some(row) => Ok(Some(row?)),
@@ -129,7 +135,7 @@ pub fn list_tasks(conn: &rusqlite::Connection, filter: TaskFilter) -> Result<Pag
         stmt.query_row(params_ref.as_slice(), |row| row.get(0))?
     };
 
-    let query_sql = format!("SELECT * FROM tasks {where_sql} ORDER BY created_at DESC LIMIT ?{idx} OFFSET ?{}", idx + 1);
+    let query_sql = format!("SELECT {TASK_COLUMNS} FROM tasks {where_sql} ORDER BY created_at DESC LIMIT ?{idx} OFFSET ?{}", idx + 1);
     let mut stmt = conn.prepare(&query_sql)?;
     let mut all_params: Vec<Box<dyn rusqlite::types::ToSql>> = params;
     all_params.push(Box::new(per_page as i64));
@@ -272,7 +278,8 @@ pub fn update_task_run_info(
 }
 
 pub fn get_all_enabled_tasks(conn: &rusqlite::Connection) -> Result<Vec<Task>> {
-    let mut stmt = conn.prepare("SELECT * FROM tasks WHERE enabled = 1 AND status = 'active'")?;
+    let sql = format!("SELECT {TASK_COLUMNS} FROM tasks WHERE enabled = 1 AND status = 'active'");
+    let mut stmt = conn.prepare(&sql)?;
     let tasks = stmt.query_map([], row_to_task)?.collect::<Result<Vec<_>, _>>()?;
     Ok(tasks)
 }
