@@ -441,7 +441,7 @@ fn calculate_next_run_for_task(task: &Task) -> Option<DateTime<Utc>> {
                 // If the computed next time is in the past, advance to the nearest future-aligned point
                 let now = Utc::now();
                 while next <= now {
-                    next = next + duration;
+                    next += duration;
                 }
                 Some(next)
             } else {
