@@ -2,7 +2,7 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
 use anyhow::Result;
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Local, Offset, Utc};
 use cron::Schedule;
 use std::str::FromStr;
 use tokio::sync::{mpsc, oneshot};
@@ -410,14 +410,24 @@ async fn run_task(
 fn calculate_next_run_for_task(task: &Task) -> Option<DateTime<Utc>> {
     match task.trigger_type {
         TriggerType::Cron => {
-            let schedule = Schedule::from_str(&task.trigger_expr).ok()?;
-            if task.cron_tz_mode == "local" {
-                schedule.after(&Local::now()).next().map(|dt| dt.with_timezone(&Utc))
+            let tz_offset_secs = if task.cron_tz_mode == "local" {
+                Local::now().offset().fix().local_minus_utc()
+            } else if task.cron_tz_mode == "utc" {
+                0
             } else {
                 let tz: chrono_tz::Tz = task.cron_tz_mode.parse().unwrap_or(chrono_tz::UTC);
                 let now = Utc::now().with_timezone(&tz);
-                schedule.after(&now).next().map(|dt| dt.with_timezone(&Utc))
-            }
+                now.offset().fix().local_minus_utc()
+            };
+
+            let expr = if tz_offset_secs != 0 {
+                convert_cron_to_utc(&task.trigger_expr, tz_offset_secs)
+            } else {
+                task.trigger_expr.clone()
+            };
+
+            let schedule = Schedule::from_str(&expr).ok()?;
+            schedule.after(&Utc::now()).next()
         }
         TriggerType::Once => {
             let dt = DateTime::parse_from_rfc3339(&task.trigger_expr).ok()?;
@@ -438,4 +448,29 @@ fn calculate_next_run_for_task(task: &Task) -> Option<DateTime<Utc>> {
             }
         }
     }
+}
+
+fn convert_cron_to_utc(expr: &str, tz_offset_secs: i32) -> String {
+    let tz_offset_hours = tz_offset_secs / 3600;
+    if tz_offset_hours == 0 {
+        return expr.to_string();
+    }
+    
+    let parts: Vec<&str> = expr.split_whitespace().collect();
+    if parts.len() != 6 {
+        return expr.to_string();
+    }
+    
+    let mut new_hour_str = parts[2].to_string();
+    if let Ok(h) = parts[2].parse::<i32>() {
+        let mut utc_h = h - tz_offset_hours;
+        if utc_h < 0 {
+            utc_h += 24;
+        } else if utc_h >= 24 {
+            utc_h -= 24;
+        }
+        new_hour_str = utc_h.to_string();
+    }
+    
+    format!("{} {} {} {} {} {}", parts[0], parts[1], new_hour_str, parts[3], parts[4], parts[5])
 }

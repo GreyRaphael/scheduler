@@ -33,7 +33,7 @@ async fn main() -> Result<()> {
     info!("Starting scheduler on {}", config.listen_addr());
 
     let db_path = config.db_path().to_string_lossy().to_string();
-    let pool = db::init_db(&db_path)?;
+    let pool = db::init_db(&db_path).await?;
     info!("Database initialized: {db_path}");
 
     let engine = scheduler::SchedulerEngine::new(pool.clone());

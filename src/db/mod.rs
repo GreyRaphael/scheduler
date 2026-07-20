@@ -6,14 +6,15 @@ use deadpool_sqlite::{Config, Pool, Runtime};
 
 pub type DbPool = Pool;
 
-pub fn init_db(db_path: &str) -> Result<DbPool> {
+pub async fn init_db(db_path: &str) -> Result<DbPool> {
     let mut cfg = Config::new(db_path);
     let pool = cfg.create_pool(Runtime::Tokio1)?;
     
     // We run schema init synchronously since it's startup
-    let conn = rusqlite::Connection::open(db_path)?;
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
-    conn.execute_batch(
+    let conn = pool.get().await?;
+    conn.interact(|conn| {
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS tasks (
             id              TEXT PRIMARY KEY,
             name            TEXT NOT NULL,
@@ -99,12 +100,13 @@ pub fn init_db(db_path: &str) -> Result<DbPool> {
                 next_run_at     TEXT,
                 max_retries     INTEGER NOT NULL DEFAULT 0,
                 timeout_secs    INTEGER,
-                cron_tz_mode    TEXT NOT NULL DEFAULT 'utc'
+                cron_tz_mode    TEXT NOT NULL DEFAULT 'utc',
+                interval_mode   TEXT NOT NULL DEFAULT 'fixed_delay'
             )
         ")?;
         conn.execute_batch("
-            INSERT INTO tasks_new (id, name, description, trigger_type, trigger_expr, command_config, webhook_config, status, enabled, created_at, updated_at, last_run_at, last_run_status, next_run_at, max_retries, timeout_secs, cron_tz_mode)
-            SELECT id, name, description, trigger_type, trigger_expr, command_config, webhook_config, status, enabled, created_at, updated_at, last_run_at, last_run_status, next_run_at, max_retries, timeout_secs, COALESCE(cron_tz_mode, 'utc')
+            INSERT INTO tasks_new (id, name, description, trigger_type, trigger_expr, command_config, webhook_config, status, enabled, created_at, updated_at, last_run_at, last_run_status, next_run_at, max_retries, timeout_secs, cron_tz_mode, interval_mode)
+            SELECT id, name, description, trigger_type, trigger_expr, command_config, webhook_config, status, enabled, created_at, updated_at, last_run_at, last_run_status, next_run_at, max_retries, timeout_secs, COALESCE(cron_tz_mode, 'utc'), 'fixed_delay'
             FROM tasks
         ")?;
         conn.execute_batch("DROP TABLE tasks")?;
@@ -143,7 +145,9 @@ pub fn init_db(db_path: &str) -> Result<DbPool> {
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_history_task_id ON execution_history(task_id);
          CREATE INDEX IF NOT EXISTS idx_history_started ON execution_history(started_at);",
-    )?;
+        )?;
+        Ok::<_, anyhow::Error>(())
+    }).await.map_err(|e| anyhow::anyhow!("DB interact error: {:?}", e))??;
     Ok(pool)
 }
 

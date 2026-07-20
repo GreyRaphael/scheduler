@@ -19,7 +19,7 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 rust-embed = "8"
 reqwest = { version = "0.13", features = ["json"] }
@@ -27,4 +27,3 @@ mime_guess = "2"
 toml = "1"
 chrono-tz = "0.10"
 deadpool-sqlite = "0.13"
-deadpool = "0.13"
