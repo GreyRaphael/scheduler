@@ -86,6 +86,9 @@ impl SchedulerEngine {
 
         self.load_tasks(&mut heap).await;
 
+        let mut cleanup_interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+        cleanup_interval.tick().await; // skip the immediate first tick
+
         loop {
             let next_entry = heap.peek().map(|e| e.0.next_run);
 
@@ -183,6 +186,22 @@ impl SchedulerEngine {
                         }
                     }
                 }
+                _ = cleanup_interval.tick() => {
+                    let pool = self.pool.clone();
+                    let max = self.max_history;
+                    tokio::spawn(async move {
+                        if let Ok(conn) = pool.get().await {
+                            match conn.interact(move |c| {
+                                history_repo::cleanup_old_history(c, max)
+                            }).await {
+                                Ok(Ok(deleted)) if deleted > 0 => {
+                                    info!("Cleaned up {deleted} old history records");
+                                }
+                                _ => {}
+                            }
+                        }
+                    });
+                }
             }
         }
     }
@@ -195,11 +214,7 @@ impl SchedulerEngine {
         }
         let conn = conn_res.unwrap();
         
-        let max_history = self.max_history;
-        let (_, updates) = match conn.interact(move |c| {
-            // Also cleanup history occasionally
-            let _ = history_repo::cleanup_old_history(c, max_history);
-            
+        let (_, updates) = match conn.interact(|c| {
             let tasks = task_repo::get_all_enabled_tasks(c)?;
             let mut updates = Vec::new();
             for task in &tasks {
