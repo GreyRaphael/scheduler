@@ -67,12 +67,21 @@ fn json_escape(s: &str) -> String {
     out
 }
 
-fn render_template(template: &str, ctx: &TaskContext) -> String {
+fn render_template(template: &str, ctx: &TaskContext, is_json: bool) -> String {
     let mut result = template.to_string();
+    
+    let escape = |s: &str| -> String {
+        if is_json {
+            json_escape(s)
+        } else {
+            s.to_string()
+        }
+    };
+
     if let Some(ref cmd) = ctx.cmd_output {
         result = result.replace("{{exit_code}}", &cmd.exit_code.map_or("-".to_string(), |c| c.to_string()));
-        result = result.replace("{{stdout}}", &json_escape(cmd.stdout.as_deref().unwrap_or("")));
-        result = result.replace("{{stderr}}", &json_escape(cmd.stderr.as_deref().unwrap_or("")));
+        result = result.replace("{{stdout}}", &escape(cmd.stdout.as_deref().unwrap_or("")));
+        result = result.replace("{{stderr}}", &escape(cmd.stderr.as_deref().unwrap_or("")));
         result = result.replace("{{status}}", cmd.status_str());
     } else {
         result = result.replace("{{exit_code}}", "-");
@@ -80,7 +89,7 @@ fn render_template(template: &str, ctx: &TaskContext) -> String {
         result = result.replace("{{stderr}}", "");
         result = result.replace("{{status}}", "success");
     }
-    result = result.replace("{{task_name}}", &json_escape(&ctx.task_name));
+    result = result.replace("{{task_name}}", &escape(&ctx.task_name));
     result
 }
 
@@ -102,18 +111,25 @@ pub async fn execute_task(task: &Task) -> Result<TaskOutput> {
 
     // Run webhook if configured (with command result context)
     if let Some(ref wh_config) = task.webhook_config {
-        execute_webhook(wh_config, timeout, &ctx).await?;
+        match execute_webhook(wh_config, timeout, &ctx).await {
+            Ok(wh_out) => {
+                if ctx.cmd_output.is_none() {
+                    return Ok(wh_out);
+                }
+            }
+            Err(e) => {
+                if ctx.cmd_output.is_some() {
+                    tracing::warn!("Webhook failed but command succeeded: {}", e);
+                } else {
+                    return Err(e);
+                }
+            }
+        }
     }
 
-    // Return command result if available, otherwise webhook success
+    // Return command result if available
     if let Some(output) = ctx.cmd_output {
         Ok(output)
-    } else if task.webhook_config.is_some() {
-        Ok(TaskOutput {
-            exit_code: Some(0),
-            stdout: None,
-            stderr: None,
-        })
     } else {
         anyhow::bail!("No command or webhook configured for task");
     }
@@ -123,23 +139,10 @@ async fn execute_command(config_val: &serde_json::Value, timeout: Duration) -> R
     let config: CommandConfig = serde_json::from_value(config_val.clone())
         .context("Failed to parse command config")?;
 
-    let shell_cmd = if config.args.is_empty() {
-        config.program.clone()
-    } else {
-        format!("{} {}", config.program, config.args.join(" "))
-    };
+    debug!("Running command: {} {:?}", config.program, config.args);
 
-    debug!("Running command via shell: {}", shell_cmd);
-
-    let mut cmd = if cfg!(target_os = "windows") {
-        let mut c = Command::new("cmd");
-        c.args(["/C", &shell_cmd]);
-        c
-    } else {
-        let mut c = Command::new("sh");
-        c.args(["-c", &shell_cmd]);
-        c
-    };
+    let mut cmd = Command::new(&config.program);
+    cmd.args(&config.args);
 
     cmd.envs(&config.env);
     if let Some(ref dir) = config.working_dir {
@@ -176,13 +179,20 @@ async fn execute_webhook(config_val: &serde_json::Value, timeout: Duration, ctx:
 
     let mut req = client.request(method, &config.url);
 
+    let mut is_json = true;
+    let mut has_ct = false;
     for (k, v) in &config.headers {
         req = req.header(k.as_str(), v.as_str());
+        if k.eq_ignore_ascii_case("content-type") {
+            has_ct = true;
+            if !v.to_lowercase().contains("application/json") {
+                is_json = false;
+            }
+        }
     }
 
     if let Some(body) = config.body {
-        let rendered = render_template(&body, ctx);
-        let has_ct = config.headers.keys().any(|k| k.eq_ignore_ascii_case("content-type"));
+        let rendered = render_template(&body, ctx, is_json);
         if !has_ct {
             req = req.header("Content-Type", "application/json");
         }

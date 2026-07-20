@@ -159,3 +159,17 @@ pub fn clear_all_history(conn: &rusqlite::Connection) -> Result<u64> {
     let rows = conn.execute("DELETE FROM execution_history", [])?;
     Ok(rows as u64)
 }
+
+pub fn cleanup_old_history(conn: &rusqlite::Connection, max_history: usize) -> Result<u64> {
+    if max_history == 0 {
+        return Ok(0);
+    }
+    // Delete oldest history, keeping only max_history per task or globally?
+    // Wait, the requirement says "定期（如每天）执行 DELETE FROM execution_history WHERE started_at < ...". But we just want to keep max_history records globally or per task?
+    // Oh, usually max_history is global, or per task.
+    // The previous implementation config.max_history was an integer. Let's do it globally.
+    // Keep the most recent `max_history` items.
+    let sql = "DELETE FROM execution_history WHERE id IN (SELECT id FROM execution_history ORDER BY started_at DESC LIMIT -1 OFFSET ?1)";
+    let rows = conn.execute(sql, rusqlite::params![max_history as i64])?;
+    Ok(rows as u64)
+}

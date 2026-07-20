@@ -12,19 +12,13 @@ async fn list_tasks(
     State(state): State<AppState>,
     Query(filter): Query<TaskFilter>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let pool = state.pool.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let conn = pool.lock().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        crate::db::task_repo::list_tasks(&conn, filter)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-    })
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let conn = state.pool.get().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let paged = conn.interact(move |c| crate::db::task_repo::list_tasks(c, filter))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    match result {
-        Ok(paged) => Ok(Json(paged)),
-        Err(e) => Err(e),
-    }
+    Ok(Json(paged))
 }
 
 async fn get_task(
@@ -32,19 +26,15 @@ async fn get_task(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
     let uuid = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let pool = state.pool.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let conn = pool.lock().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        crate::db::task_repo::get_task(&conn, uuid)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-    })
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let conn = state.pool.get().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let task_opt = conn.interact(move |c| crate::db::task_repo::get_task(c, uuid))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    match result {
-        Ok(Some(task)) => Ok(Json(task)),
-        Ok(None) => Err(StatusCode::NOT_FOUND),
-        Err(e) => Err(e),
+    match task_opt {
+        Some(task) => Ok(Json(task)),
+        None => Err(StatusCode::NOT_FOUND),
     }
 }
 
@@ -52,28 +42,22 @@ async fn create_task(
     State(state): State<AppState>,
     Json(req): Json<CreateTaskRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let pool = state.pool.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let conn = pool.lock().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        crate::db::task_repo::insert_task(&conn, req)
-            .map_err(|e| {
-                if e.to_string().contains("UNIQUE") {
-                    StatusCode::CONFLICT
-                } else {
-                    StatusCode::INTERNAL_SERVER_ERROR
-                }
-            })
+    let conn = state.pool.get().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let task = conn.interact(move |c| {
+        crate::db::task_repo::insert_task(c, req).map_err(|e| {
+            if e.to_string().contains("UNIQUE") {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        })
     })
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|e| e)?;
 
-    match result {
-        Ok(task) => {
-            let _ = state.scheduler_tx.try_send(crate::scheduler::SchedulerCommand::Reload);
-            Ok((StatusCode::CREATED, Json(task)))
-        }
-        Err(e) => Err(e),
-    }
+    let _ = state.scheduler_tx.send(crate::scheduler::SchedulerCommand::Reload).await;
+    Ok((StatusCode::CREATED, Json(task)))
 }
 
 async fn update_task(
@@ -82,28 +66,26 @@ async fn update_task(
     Json(req): Json<UpdateTaskRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
     let uuid = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let pool = state.pool.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let conn = pool.lock().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        crate::db::task_repo::update_task(&conn, uuid, req)
-            .map_err(|e| {
-                if e.to_string().contains("UNIQUE") {
-                    StatusCode::CONFLICT
-                } else {
-                    StatusCode::INTERNAL_SERVER_ERROR
-                }
-            })
+    let conn = state.pool.get().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let task_opt = conn.interact(move |c| {
+        crate::db::task_repo::update_task(c, uuid, req).map_err(|e| {
+            if e.to_string().contains("UNIQUE") {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        })
     })
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|e| e)?;
 
-    match result {
-        Ok(Some(task)) => {
-            let _ = state.scheduler_tx.try_send(crate::scheduler::SchedulerCommand::Reload);
+    match task_opt {
+        Some(task) => {
+            let _ = state.scheduler_tx.send(crate::scheduler::SchedulerCommand::Reload).await;
             Ok(Json(task))
         }
-        Ok(None) => Err(StatusCode::NOT_FOUND),
-        Err(e) => Err(e),
+        None => Err(StatusCode::NOT_FOUND),
     }
 }
 
@@ -112,22 +94,17 @@ async fn delete_task(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
     let uuid = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let pool = state.pool.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let conn = pool.lock().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        crate::db::task_repo::delete_task(&conn, uuid)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-    })
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let conn = state.pool.get().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let deleted = conn.interact(move |c| crate::db::task_repo::delete_task(c, uuid))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    match result {
-        Ok(true) => {
-            let _ = state.scheduler_tx.try_send(crate::scheduler::SchedulerCommand::Reload);
-            Ok(StatusCode::NO_CONTENT)
-        }
-        Ok(false) => Err(StatusCode::NOT_FOUND),
-        Err(e) => Err(e),
+    if deleted {
+        let _ = state.scheduler_tx.send(crate::scheduler::SchedulerCommand::Reload).await;
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(StatusCode::NOT_FOUND)
     }
 }
 
@@ -136,22 +113,18 @@ async fn enable_task(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
     let uuid = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let pool = state.pool.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let conn = pool.lock().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        crate::db::task_repo::set_task_enabled(&conn, uuid, true)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-    })
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let conn = state.pool.get().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let task_opt = conn.interact(move |c| crate::db::task_repo::set_task_enabled(c, uuid, true))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    match result {
-        Ok(Some(task)) => {
-            let _ = state.scheduler_tx.try_send(crate::scheduler::SchedulerCommand::Reload);
+    match task_opt {
+        Some(task) => {
+            let _ = state.scheduler_tx.send(crate::scheduler::SchedulerCommand::Reload).await;
             Ok(Json(task))
         }
-        Ok(None) => Err(StatusCode::NOT_FOUND),
-        Err(e) => Err(e),
+        None => Err(StatusCode::NOT_FOUND),
     }
 }
 
@@ -160,22 +133,18 @@ async fn disable_task(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
     let uuid = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let pool = state.pool.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let conn = pool.lock().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        crate::db::task_repo::set_task_enabled(&conn, uuid, false)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-    })
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let conn = state.pool.get().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let task_opt = conn.interact(move |c| crate::db::task_repo::set_task_enabled(c, uuid, false))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    match result {
-        Ok(Some(task)) => {
-            let _ = state.scheduler_tx.try_send(crate::scheduler::SchedulerCommand::Reload);
+    match task_opt {
+        Some(task) => {
+            let _ = state.scheduler_tx.send(crate::scheduler::SchedulerCommand::Reload).await;
             Ok(Json(task))
         }
-        Ok(None) => Err(StatusCode::NOT_FOUND),
-        Err(e) => Err(e),
+        None => Err(StatusCode::NOT_FOUND),
     }
 }
 
@@ -184,17 +153,13 @@ async fn trigger_task(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
     let uuid = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let (tx, rx) = tokio::sync::oneshot::channel();
     state
         .scheduler_tx
-        .try_send(crate::scheduler::SchedulerCommand::TriggerNow(uuid, tx))
+        .send(crate::scheduler::SchedulerCommand::TriggerNow(uuid))
+        .await
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
 
-    match rx.await {
-        Ok(Ok(())) => Ok(Json(serde_json::json!({"message": "Task triggered successfully"}))),
-        Ok(Err(e)) => Ok(Json(serde_json::json!({"error": e.to_string()}))),
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
-    }
+    Ok(StatusCode::ACCEPTED)
 }
 
 pub fn router(_state: AppState) -> Router<AppState> {

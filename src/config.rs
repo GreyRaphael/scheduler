@@ -50,7 +50,7 @@ impl Config {
 
         let listen = cli.listen
             .or_else(|| file_cfg.listen.as_ref().and_then(|s| s.parse().ok()))
-            .unwrap_or("0.0.0.0:6060".parse().unwrap());
+            .unwrap_or("0.0.0.0:7070".parse().unwrap());
 
         let db = cli.db
             .or_else(|| file_cfg.db.map(PathBuf::from))
@@ -77,7 +77,7 @@ impl Config {
     }
 
     pub fn listen_addr(&self) -> SocketAddr {
-        self.listen.unwrap_or_else(|| "0.0.0.0:6060".parse().unwrap())
+        self.listen.unwrap_or_else(|| "0.0.0.0:7070".parse().unwrap())
     }
 
     pub fn db_path(&self) -> PathBuf {

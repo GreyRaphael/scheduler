@@ -38,6 +38,7 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
         max_retries: row.get::<_, i64>(14)? as u32,
         timeout_secs: row.get::<_, Option<i64>>(15)?.map(|v| v as u64),
         cron_tz_mode: row.get::<_, Option<String>>(16)?.unwrap_or_else(|| "utc".to_string()),
+        interval_mode: row.get::<_, Option<String>>(17)?.unwrap_or_else(|| "fixed_delay".to_string()),
     })
 }
 
@@ -48,11 +49,12 @@ pub fn insert_task(conn: &rusqlite::Connection, req: CreateTaskRequest) -> Resul
     let max_retries = req.max_retries.unwrap_or(0) as i32;
     let timeout = req.timeout_secs.map(|v| v as i64);
     let cron_tz_mode = req.cron_tz_mode.unwrap_or_else(|| "utc".to_string());
+    let interval_mode = req.interval_mode.unwrap_or_else(|| "fixed_delay".to_string());
     let cmd = req.command_config.map(|v| v.to_string());
     let wh = req.webhook_config.map(|v| v.to_string());
     conn.execute(
-        "INSERT INTO tasks (id, name, description, trigger_type, trigger_expr, command_config, webhook_config, status, enabled, created_at, updated_at, last_run_status, max_retries, timeout_secs, cron_tz_mode)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        "INSERT INTO tasks (id, name, description, trigger_type, trigger_expr, command_config, webhook_config, status, enabled, created_at, updated_at, last_run_status, max_retries, timeout_secs, cron_tz_mode, interval_mode)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         rusqlite::params![
             id.to_string(),
             req.name,
@@ -69,6 +71,7 @@ pub fn insert_task(conn: &rusqlite::Connection, req: CreateTaskRequest) -> Resul
             max_retries,
             timeout,
             cron_tz_mode,
+            interval_mode,
         ],
     )?;
     get_task(conn, id)?.ok_or_else(|| anyhow::anyhow!("Failed to retrieve created task"))
@@ -183,6 +186,11 @@ pub fn update_task(conn: &rusqlite::Connection, id: Uuid, req: UpdateTaskRequest
     }
     if let Some(mode) = req.cron_tz_mode {
         sets.push(format!("cron_tz_mode = ?{idx}"));
+        params.push(Box::new(mode));
+        idx += 1;
+    }
+    if let Some(mode) = req.interval_mode {
+        sets.push(format!("interval_mode = ?{idx}"));
         params.push(Box::new(mode));
         idx += 1;
     }

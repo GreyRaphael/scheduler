@@ -12,37 +12,25 @@ async fn list_all_history(
     State(state): State<AppState>,
     Query(filter): Query<HistoryFilter>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let pool = state.pool.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let conn = pool.lock().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        crate::db::history_repo::list_all_history(&conn, filter)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-    })
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let conn = state.pool.get().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let paged = conn.interact(move |c| crate::db::history_repo::list_all_history(c, filter))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    match result {
-        Ok(paged) => Ok(Json(paged)),
-        Err(e) => Err(e),
-    }
+    Ok(Json(paged))
 }
 
 async fn clear_all_history(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let pool = state.pool.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let conn = pool.lock().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        crate::db::history_repo::clear_all_history(&conn)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-    })
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let conn = state.pool.get().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let count = conn.interact(move |c| crate::db::history_repo::clear_all_history(c))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    match result {
-        Ok(count) => Ok(Json(serde_json::json!({"deleted": count}))),
-        Err(e) => Err(e),
-    }
+    Ok(Json(serde_json::json!({"deleted": count})))
 }
 
 async fn get_history_detail(
@@ -50,19 +38,15 @@ async fn get_history_detail(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
     let uuid = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let pool = state.pool.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let conn = pool.lock().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        crate::db::history_repo::get_history(&conn, uuid)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-    })
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let conn = state.pool.get().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let hist_opt = conn.interact(move |c| crate::db::history_repo::get_history(c, uuid))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    match result {
-        Ok(Some(h)) => Ok(Json(h)),
-        Ok(None) => Err(StatusCode::NOT_FOUND),
-        Err(e) => Err(e),
+    match hist_opt {
+        Some(h) => Ok(Json(h)),
+        None => Err(StatusCode::NOT_FOUND),
     }
 }
 
@@ -72,19 +56,13 @@ async fn list_task_history(
     Query(filter): Query<HistoryFilter>,
 ) -> Result<impl IntoResponse, StatusCode> {
     let uuid = Uuid::parse_str(&task_id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let pool = state.pool.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let conn = pool.lock().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        crate::db::history_repo::list_task_history(&conn, uuid, filter.page, filter.per_page)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-    })
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let conn = state.pool.get().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let paged = conn.interact(move |c| crate::db::history_repo::list_task_history(c, uuid, filter.page, filter.per_page))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    match result {
-        Ok(paged) => Ok(Json(paged)),
-        Err(e) => Err(e),
-    }
+    Ok(Json(paged))
 }
 
 pub fn router(_state: AppState) -> Router<AppState> {

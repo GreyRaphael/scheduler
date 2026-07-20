@@ -18,7 +18,7 @@ pub enum SchedulerCommand {
     Reload,
     Pause,
     Resume,
-    TriggerNow(Uuid, oneshot::Sender<Result<()>>),
+    TriggerNow(Uuid),
     Shutdown,
 }
 
@@ -32,6 +32,7 @@ struct TaskCompletion {
     task_name: String,
     next_run: Option<DateTime<Utc>>,
     trigger_type: TriggerType,
+    is_manual: bool,
 }
 
 impl PartialEq for ScheduleEntry {
@@ -82,7 +83,7 @@ impl SchedulerEngine {
         let mut paused = false;
         let (completion_tx, mut completion_rx) = mpsc::channel::<TaskCompletion>(64);
 
-        self.load_tasks(&mut heap);
+        self.load_tasks(&mut heap).await;
 
         loop {
             let next_entry = heap.peek().map(|e| e.0.next_run);
@@ -94,7 +95,7 @@ impl SchedulerEngine {
                         SchedulerCommand::Reload => {
                             info!("Reloading all tasks");
                             heap.clear();
-                            self.load_tasks(&mut heap);
+                            self.load_tasks(&mut heap).await;
                         }
                         SchedulerCommand::Pause => {
                             paused = true;
@@ -104,9 +105,9 @@ impl SchedulerEngine {
                             paused = false;
                             info!("Scheduler resumed");
                             heap.clear();
-                            self.load_tasks(&mut heap);
+                            self.load_tasks(&mut heap).await;
                         }
-                        SchedulerCommand::TriggerNow(task_id, reply) => {
+                        SchedulerCommand::TriggerNow(task_id) => {
                             let pool = self.pool.clone();
                             let tx = completion_tx.clone();
                             tokio::spawn(async move {
@@ -114,7 +115,6 @@ impl SchedulerEngine {
                                 if let Some(comp) = result {
                                     let _ = tx.send(comp).await;
                                 }
-                                let _ = reply.send(Ok(()));
                             });
                         }
                         SchedulerCommand::Shutdown => {
@@ -124,32 +124,39 @@ impl SchedulerEngine {
                     }
                 }
                 Some(completion) = completion_rx.recv() => {
-                    info!("Task '{}' completed, rescheduling", completion.task_name);
-                    let conn = match self.pool.lock() {
-                        Ok(c) => c,
-                        Err(e) => {
-                            error!("DB lock failed: {e}");
-                            continue;
+                    info!("Task '{}' completed, manual: {}", completion.task_name, completion.is_manual);
+                    
+                    if !completion.is_manual {
+                        let pool = self.pool.clone();
+                        let cid = completion.task_id;
+                        let next = completion.next_run;
+                        let trigger_type = completion.trigger_type.clone();
+                        let task_name = completion.task_name.clone();
+                        
+                        tokio::spawn(async move {
+                            if let Ok(conn) = pool.get().await {
+                                let _ = conn.interact(move |c| {
+                                    if let Some(n) = next {
+                                        let _ = task_repo::update_task_run_info(c, cid, None, Some(n), None, None);
+                                    } else if trigger_type == TriggerType::Once {
+                                        let _ = task_repo::set_task_enabled(c, cid, false);
+                                        let _ = task_repo::clear_task_next_run(c, cid);
+                                        let _ = task_repo::update_task_run_info(
+                                            c, cid, None, None, Some(TaskStatus::Completed), None
+                                        );
+                                    }
+                                }).await;
+                            }
+                        });
+                        
+                        if let Some(next) = completion.next_run {
+                            heap.push(Reverse(ScheduleEntry {
+                                next_run: next,
+                                task_id: completion.task_id,
+                            }));
+                        } else if completion.trigger_type == TriggerType::Once {
+                            info!("One-time task '{}' completed and disabled", completion.task_name);
                         }
-                    };
-                    if let Some(next) = completion.next_run {
-                        let _ = task_repo::update_task_run_info(&conn, completion.task_id, None, Some(next), None, None);
-                        heap.push(Reverse(ScheduleEntry {
-                            next_run: next,
-                            task_id: completion.task_id,
-                        }));
-                    } else if completion.trigger_type == TriggerType::Once {
-                        let _ = task_repo::set_task_enabled(&conn, completion.task_id, false);
-                        let _ = task_repo::clear_task_next_run(&conn, completion.task_id);
-                        let _ = task_repo::update_task_run_info(
-                            &conn,
-                            completion.task_id,
-                            None,
-                            None,
-                            Some(TaskStatus::Completed),
-                            None,
-                        );
-                        info!("One-time task '{}' completed and disabled", completion.task_name);
                     }
                 }
                 _ = async {
@@ -178,64 +185,48 @@ impl SchedulerEngine {
         }
     }
 
-    fn load_tasks(&self, heap: &mut BinaryHeap<Reverse<ScheduleEntry>>) {
-        let conn = match self.pool.lock() {
-            Ok(c) => c,
-            Err(e) => {
-                error!("Failed to lock DB: {e}");
-                return;
-            }
-        };
-        let tasks = match task_repo::get_all_enabled_tasks(&conn) {
-            Ok(t) => t,
-            Err(e) => {
-                error!("Failed to load tasks: {e}");
-                return;
-            }
-        };
-        for task in tasks {
-            let next = task.next_run_at
-                .filter(|t| *t > Utc::now())
-                .or_else(|| self.calculate_next_run(&task));
-            if let Some(next) = next {
-                if task.next_run_at != Some(next) {
-                    let _ = task_repo::update_task_run_info(&conn, task.id, None, Some(next), None, None);
+    async fn load_tasks(&self, heap: &mut BinaryHeap<Reverse<ScheduleEntry>>) {
+        let conn_res = self.pool.get().await;
+        if let Err(e) = conn_res {
+            error!("Failed to get DB connection: {e}");
+            return;
+        }
+        let conn = conn_res.unwrap();
+        
+        let (tasks, updates) = match conn.interact(|c| {
+            // Also cleanup history occasionally
+            let _ = history_repo::cleanup_old_history(c, 1000);
+            
+            let tasks = task_repo::get_all_enabled_tasks(c)?;
+            let mut updates = Vec::new();
+            for task in &tasks {
+                let next = task.next_run_at
+                    .filter(|t| *t > Utc::now())
+                    .or_else(|| calculate_next_run_for_task(task));
+                if let Some(n) = next {
+                    if task.next_run_at != Some(n) {
+                        let _ = task_repo::update_task_run_info(c, task.id, None, Some(n), None, None);
+                    }
+                    updates.push((task.id, task.name.clone(), n));
                 }
-                heap.push(Reverse(ScheduleEntry {
-                    next_run: next,
-                    task_id: task.id,
-                }));
-                info!("Loaded task '{}' ({}), next run: {}", task.name, task.id, next);
             }
+            Ok::<_, anyhow::Error>((tasks, updates))
+        }).await {
+            Ok(Ok(res)) => res,
+            _ => {
+                error!("Failed to load tasks");
+                return;
+            }
+        };
+
+        for (id, name, next) in updates {
+            heap.push(Reverse(ScheduleEntry {
+                next_run: next,
+                task_id: id,
+            }));
+            info!("Loaded task '{}' ({}), next run: {}", name, id, next);
         }
         info!("Loaded {} tasks into scheduler", heap.len());
-    }
-
-    fn calculate_next_run(&self, task: &Task) -> Option<DateTime<Utc>> {
-        match task.trigger_type {
-            TriggerType::Cron => {
-                let expr = if task.cron_tz_mode == "local" {
-                    convert_cron_to_utc(&task.trigger_expr)
-                } else {
-                    task.trigger_expr.clone()
-                };
-                let schedule = Schedule::from_str(&expr).ok()?;
-                schedule.after(&Utc::now()).next()
-            }
-            TriggerType::Once => {
-                let dt = DateTime::parse_from_rfc3339(&task.trigger_expr).ok()?;
-                let dt_utc = dt.with_timezone(&Utc);
-                if dt_utc > Utc::now() {
-                    Some(dt_utc)
-                } else {
-                    None
-                }
-            }
-            TriggerType::Interval => {
-                let secs: u64 = task.trigger_expr.parse().ok()?;
-                Some(Utc::now() + chrono::Duration::seconds(secs as i64))
-            }
-        }
     }
 }
 
@@ -245,21 +236,21 @@ async fn run_task(
     is_manual: bool,
 ) -> Option<TaskCompletion> {
     let task = {
-        let conn = match pool.lock() {
+        let conn = match pool.get().await {
             Ok(c) => c,
             Err(e) => {
-                error!("DB lock failed: {e}");
+                error!("DB get failed: {e}");
                 return None;
             }
         };
-        match task_repo::get_task(&conn, task_id) {
-            Ok(Some(t)) => t,
-            Ok(None) => {
+        match conn.interact(move |c| task_repo::get_task(c, task_id)).await {
+            Ok(Ok(Some(t))) => t,
+            Ok(Ok(None)) => {
                 warn!("Task {task_id} not found, skipping");
                 return None;
             }
-            Err(e) => {
-                error!("Failed to get task {task_id}: {e}");
+            _ => {
+                error!("Failed to get task {task_id}");
                 return None;
             }
         }
@@ -282,17 +273,17 @@ async fn run_task(
         }
 
         let history = {
-            let conn = match pool.lock() {
+            let conn = match pool.get().await {
                 Ok(c) => c,
                 Err(e) => {
-                    error!("DB lock failed: {e}");
+                    error!("DB get failed: {e}");
                     return None;
                 }
             };
-            match history_repo::insert_history(&conn, task_id, RunStatus::Running) {
-                Ok(h) => h,
-                Err(e) => {
-                    error!("Failed to create history: {e}");
+            match conn.interact(move |c| history_repo::insert_history(c, task_id, RunStatus::Running)).await {
+                Ok(Ok(h)) => h,
+                _ => {
+                    error!("Failed to create history");
                     return None;
                 }
             }
@@ -301,13 +292,15 @@ async fn run_task(
         let result = executor::execute_task(&task).await;
 
         {
-            let conn = match pool.lock() {
+            let conn = match pool.get().await {
                 Ok(c) => c,
                 Err(e) => {
-                    error!("DB lock failed: {e}");
+                    error!("DB get failed: {e}");
                     return None;
                 }
             };
+            let history_id = history.id;
+            
             match result {
                 Ok(output) => {
                     let failed = output.exit_code.is_some_and(|c| c != 0);
@@ -317,17 +310,25 @@ async fn run_task(
                     } else {
                         None
                     };
-                    let _ = history_repo::update_history_result(
-                        &conn,
-                        history.id,
-                        run_status,
-                        output.exit_code,
-                        output.stdout.clone(),
-                        output.stderr.clone(),
-                        error_msg,
-                    );
+                    
+                    let exit_code = output.exit_code;
+                    let stdout = output.stdout;
+                    let stderr = output.stderr;
+                    
+                    let _ = conn.interact(move |c| {
+                        history_repo::update_history_result(
+                            c,
+                            history_id,
+                            run_status,
+                            exit_code,
+                            stdout,
+                            stderr,
+                            error_msg,
+                        )
+                    }).await;
+
                     if failed {
-                        warn!("Task '{}' failed with exit code {}", task_name, output.exit_code.unwrap_or(-1));
+                        warn!("Task '{}' failed with exit code {}", task_name, exit_code.unwrap_or(-1));
                     } else {
                         success = true;
                         info!("Task '{}' completed successfully", task_name);
@@ -335,20 +336,23 @@ async fn run_task(
                     }
                 }
                 Err(e) => {
-                    let status = if e.to_string().contains("timeout") {
+                    let e_msg = e.to_string();
+                    let status = if e_msg.contains("timeout") {
                         RunStatus::Timeout
                     } else {
                         RunStatus::Failed
                     };
-                    let _ = history_repo::update_history_result(
-                        &conn,
-                        history.id,
-                        status,
-                        None,
-                        None,
-                        None,
-                        Some(e.to_string()),
-                    );
+                    let _ = conn.interact(move |c| {
+                        history_repo::update_history_result(
+                            c,
+                            history_id,
+                            status,
+                            None,
+                            None,
+                            None,
+                            Some(e_msg),
+                        )
+                    }).await;
                     warn!("Task '{}' failed: {e}", task_name);
                 }
             }
@@ -356,100 +360,82 @@ async fn run_task(
     }
 
     // Update task run info
-    let next_run = {
-        let conn = match pool.lock() {
-            Ok(c) => c,
-            Err(e) => {
-                error!("DB lock failed: {e}");
-                return None;
-            }
-        };
-        let last_run_status = if success { "success" } else { "failed" };
-        let _ = task_repo::update_task_run_info(
-            &conn,
-            task_id,
-            Some(Utc::now()),
-            None,
-            None,
-            Some(last_run_status),
-        );
-
+    let next_run = if !is_manual {
+        let conn_res = pool.get().await;
+        if let Ok(conn) = conn_res {
+            let last_run_status = if success { "success".to_string() } else { "failed".to_string() };
+            let _ = conn.interact(move |c| {
+                task_repo::update_task_run_info(
+                    c,
+                    task_id,
+                    Some(Utc::now()),
+                    None,
+                    None,
+                    Some(&last_run_status),
+                )
+            }).await;
+        }
         calculate_next_run_for_task(&task)
+    } else {
+        let conn_res = pool.get().await;
+        if let Ok(conn) = conn_res {
+            let last_run_status = if success { "success".to_string() } else { "failed".to_string() };
+            let _ = conn.interact(move |c| {
+                task_repo::update_task_run_info(
+                    c,
+                    task_id,
+                    Some(Utc::now()),
+                    None,
+                    None,
+                    Some(&last_run_status),
+                )
+            }).await;
+        }
+        None
     };
 
     if is_manual {
         info!("Manual task '{}' completed", task_name);
     }
 
-    Some(TaskCompletion {
+        Some(TaskCompletion {
         task_id,
         task_name,
         next_run,
         trigger_type,
+        is_manual,
     })
 }
 
 fn calculate_next_run_for_task(task: &Task) -> Option<DateTime<Utc>> {
     match task.trigger_type {
         TriggerType::Cron => {
-            let expr = if task.cron_tz_mode == "local" {
-                convert_cron_to_utc(&task.trigger_expr)
+            let schedule = Schedule::from_str(&task.trigger_expr).ok()?;
+            if task.cron_tz_mode == "local" {
+                schedule.after(&Local::now()).next().map(|dt| dt.with_timezone(&Utc))
             } else {
-                task.trigger_expr.clone()
-            };
-            let schedule = Schedule::from_str(&expr).ok()?;
-            schedule.after(&Utc::now()).next()
+                let tz: chrono_tz::Tz = task.cron_tz_mode.parse().unwrap_or(chrono_tz::UTC);
+                let now = Utc::now().with_timezone(&tz);
+                schedule.after(&now).next().map(|dt| dt.with_timezone(&Utc))
+            }
         }
-        TriggerType::Once => None,
+        TriggerType::Once => {
+            let dt = DateTime::parse_from_rfc3339(&task.trigger_expr).ok()?;
+            let dt_utc = dt.with_timezone(&Utc);
+            if dt_utc > Utc::now() {
+                Some(dt_utc)
+            } else {
+                None
+            }
+        }
         TriggerType::Interval => {
             let secs: u64 = task.trigger_expr.parse().ok()?;
-            Some(Utc::now() + chrono::Duration::seconds(secs as i64))
+            if task.interval_mode == "fixed_rate" {
+                let base = task.next_run_at.unwrap_or_else(|| Utc::now());
+                Some(base + chrono::Duration::seconds(secs as i64))
+            } else {
+                Some(Utc::now() + chrono::Duration::seconds(secs as i64))
+            }
         }
     }
-}
-
-fn convert_cron_to_utc(expr: &str) -> String {
-    let offset_secs = -Local::now().offset().utc_minus_local();
-    let offset_hours = offset_secs / 3600;
-    if offset_hours == 0 {
-        return expr.to_string();
-    }
-    let fields: Vec<&str> = expr.split_whitespace().collect();
-    let hour_idx = if fields.len() == 6 { 2 } else { 1 };
-    let mut result: Vec<String> = fields.iter().map(|s| s.to_string()).collect();
-    if result[hour_idx] != "*" {
-        let shifted: Vec<String> = result[hour_idx]
-            .split(',')
-            .map(|part| {
-                if let Some(step_pos) = part.find('/') {
-                    let base = &part[..step_pos];
-                    let step = &part[step_pos..];
-                    if base == "*" {
-                        return format!("*{step}");
-                    }
-                    if let Some(dash_pos) = base.find('-') {
-                        let s: i32 = base[..dash_pos].parse().unwrap_or(0);
-                        let e: i32 = base[dash_pos + 1..].parse().unwrap_or(0);
-                        let ns = ((s - offset_hours) % 24 + 24) % 24;
-                        let ne = ((e - offset_hours) % 24 + 24) % 24;
-                        return format!("{ns}-{ne}{step}");
-                    }
-                    return part.to_string();
-                }
-                if let Some(dash_pos) = part.find('-') {
-                    let s: i32 = part[..dash_pos].parse().unwrap_or(0);
-                    let e: i32 = part[dash_pos + 1..].parse().unwrap_or(0);
-                    let ns = ((s - offset_hours) % 24 + 24) % 24;
-                    let ne = ((e - offset_hours) % 24 + 24) % 24;
-                    return format!("{ns}-{ne}");
-                }
-                if let Ok(h) = part.parse::<i32>() {
-                    return format!("{}", ((h - offset_hours) % 24 + 24) % 24);
-                }
-                part.to_string()
-            })
-            .collect();
-        result[hour_idx] = shifted.join(",");
-    }
-    result.join(" ")
 }

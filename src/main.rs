@@ -82,6 +82,9 @@ async fn main() -> Result<()> {
 
 async fn static_handler(uri: axum::http::Uri) -> impl IntoResponse {
     let path = uri.path().trim_start_matches('/');
+    if path.starts_with("api/") {
+        return axum::http::StatusCode::NOT_FOUND.into_response();
+    }
     let is_index = path.is_empty() || path == "index.html";
 
     let file = if is_index {

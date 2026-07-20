@@ -178,6 +178,13 @@ export SCHEDULER_TOKEN=mytoken
 
 以任务创建/加载时刻为起点，每隔指定秒数执行一次。
 
+创建 Interval 任务时，可通过 `interval_mode` 字段选择间隔模式：
+
+| interval_mode | 说明 |
+|---|---|
+| `fixed_delay`（默认） | **固定延迟**：等待上次任务**执行完成**后，再开始计算下一个间隔时间。适用于执行耗时较长，或不能重叠执行的任务。 |
+| `fixed_rate` | **固定频率**：忽略任务执行耗时，严格按照设定的间隔时间触发（例如每 60 秒触发一次，不管中间任务执行了多久）。如果任务执行时间超过了间隔时间，可能会导致任务并发或堆积。 |
+
 | trigger_expr | 含义 |
 |---|---|
 | `60` | 每 60 秒（1 分钟） |
@@ -209,6 +216,7 @@ export SCHEDULER_TOKEN=mytoken
   "trigger_type": "interval",
   "trigger_expr": "3600",
   "action_type": "command",
+  "interval_mode": "fixed_delay",
   "action_config": {
     "program": "find",
     "args": ["/tmp", "-type", "f", "-mtime", "+1", "-delete"]
@@ -312,7 +320,8 @@ export SCHEDULER_TOKEN=mytoken
 | `description` | string | `""` | 任务描述 |
 | `trigger_type` | string | — | `cron` / `once` / `interval` |
 | `trigger_expr` | string | — | 触发表达式（见上文） |
-| `cron_tz_mode` | string | `utc` | Cron 时区模式：`utc` / `local`（仅 trigger_type=cron 时生效） |
+| `cron_tz_mode` | string | `utc` | Cron 时区模式：`utc` / `local` / `Asia/Shanghai` 等（仅 trigger_type=cron 时生效） |
+| `interval_mode` | string | `fixed_delay` | 间隔模式：`fixed_delay` / `fixed_rate`（仅 trigger_type=interval 时生效） |
 | `command_config` | object | — | Command 配置（见上文，与 webhook_config 至少填一个） |
 | `webhook_config` | object | — | Webhook 配置（见上文，与 command_config 至少填一个） |
 | `enabled` | bool | `true` | 是否启用 |

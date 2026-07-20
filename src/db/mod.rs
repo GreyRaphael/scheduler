@@ -2,12 +2,15 @@ pub mod task_repo;
 pub mod history_repo;
 
 use anyhow::Result;
-use std::sync::Arc;
-use std::sync::Mutex;
+use deadpool_sqlite::{Config, Pool, Runtime};
 
-pub type DbPool = Arc<Mutex<rusqlite::Connection>>;
+pub type DbPool = Pool;
 
 pub fn init_db(db_path: &str) -> Result<DbPool> {
+    let mut cfg = Config::new(db_path);
+    let pool = cfg.create_pool(Runtime::Tokio1)?;
+    
+    // We run schema init synchronously since it's startup
     let conn = rusqlite::Connection::open(db_path)?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
     conn.execute_batch(
@@ -28,7 +31,8 @@ pub fn init_db(db_path: &str) -> Result<DbPool> {
             next_run_at     TEXT,
             max_retries     INTEGER NOT NULL DEFAULT 0,
             timeout_secs    INTEGER,
-            cron_tz_mode    TEXT NOT NULL DEFAULT 'utc'
+            cron_tz_mode    TEXT NOT NULL DEFAULT 'utc',
+            interval_mode   TEXT NOT NULL DEFAULT 'fixed_delay'
         )",
     )?;
 
@@ -113,6 +117,13 @@ pub fn init_db(db_path: &str) -> Result<DbPool> {
         if !has_unique {
             conn.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_name ON tasks(name)")?;
         }
+        
+        let has_interval_mode: bool = conn.prepare("PRAGMA table_info(tasks)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .any(|name| name.as_deref() == Ok("interval_mode"));
+        if !has_interval_mode {
+            conn.execute_batch("ALTER TABLE tasks ADD COLUMN interval_mode TEXT NOT NULL DEFAULT 'fixed_delay'")?;
+        }
     }
 
     conn.execute_batch(
@@ -133,7 +144,7 @@ pub fn init_db(db_path: &str) -> Result<DbPool> {
         "CREATE INDEX IF NOT EXISTS idx_history_task_id ON execution_history(task_id);
          CREATE INDEX IF NOT EXISTS idx_history_started ON execution_history(started_at);",
     )?;
-    Ok(Arc::new(Mutex::new(conn)))
+    Ok(pool)
 }
 
 fn gotify_token_webhook(token: &Option<String>) -> Option<String> {
