@@ -7,7 +7,7 @@ use deadpool_sqlite::{Config, Pool, Runtime};
 pub type DbPool = Pool;
 
 pub async fn init_db(db_path: &str) -> Result<DbPool> {
-    let mut cfg = Config::new(db_path);
+    let cfg = Config::new(db_path);
     let pool = cfg.create_pool(Runtime::Tokio1)?;
     
     // We run schema init synchronously since it's startup

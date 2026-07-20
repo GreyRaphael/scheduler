@@ -53,8 +53,7 @@ async fn create_task(
         })
     })
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    .map_err(|e| e)?;
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
 
     let _ = state.scheduler_tx.send(crate::scheduler::SchedulerCommand::Reload).await;
     Ok((StatusCode::CREATED, Json(task)))
@@ -77,8 +76,7 @@ async fn update_task(
         })
     })
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    .map_err(|e| e)?;
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
 
     match task_opt {
         Some(task) => {

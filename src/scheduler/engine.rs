@@ -1,11 +1,10 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
-use anyhow::Result;
 use chrono::{DateTime, Local, Offset, Utc};
 use cron::Schedule;
 use std::str::FromStr;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -131,8 +130,7 @@ impl SchedulerEngine {
                         let cid = completion.task_id;
                         let next = completion.next_run;
                         let trigger_type = completion.trigger_type.clone();
-                        let task_name = completion.task_name.clone();
-                        
+
                         tokio::spawn(async move {
                             if let Ok(conn) = pool.get().await {
                                 let _ = conn.interact(move |c| {
@@ -193,7 +191,7 @@ impl SchedulerEngine {
         }
         let conn = conn_res.unwrap();
         
-        let (tasks, updates) = match conn.interact(|c| {
+        let (_, updates) = match conn.interact(|c| {
             // Also cleanup history occasionally
             let _ = history_repo::cleanup_old_history(c, 1000);
             
@@ -441,7 +439,7 @@ fn calculate_next_run_for_task(task: &Task) -> Option<DateTime<Utc>> {
         TriggerType::Interval => {
             let secs: u64 = task.trigger_expr.parse().ok()?;
             if task.interval_mode == "fixed_rate" {
-                let base = task.next_run_at.unwrap_or_else(|| Utc::now());
+                let base = task.next_run_at.unwrap_or_else(Utc::now);
                 Some(base + chrono::Duration::seconds(secs as i64))
             } else {
                 Some(Utc::now() + chrono::Duration::seconds(secs as i64))
@@ -455,22 +453,53 @@ fn convert_cron_to_utc(expr: &str, tz_offset_secs: i32) -> String {
     if tz_offset_hours == 0 {
         return expr.to_string();
     }
-    
-    let parts: Vec<&str> = expr.split_whitespace().collect();
-    if parts.len() != 6 {
+
+    let fields: Vec<&str> = expr.split_whitespace().collect();
+    // 6-field cron: sec min hour dom month dow
+    let hour_idx = if fields.len() == 6 { 2 } else { 1 };
+    if fields.len() < 5 {
         return expr.to_string();
     }
-    
-    let mut new_hour_str = parts[2].to_string();
-    if let Ok(h) = parts[2].parse::<i32>() {
-        let mut utc_h = h - tz_offset_hours;
-        if utc_h < 0 {
-            utc_h += 24;
-        } else if utc_h >= 24 {
-            utc_h -= 24;
-        }
-        new_hour_str = utc_h.to_string();
+
+    let mut result: Vec<String> = fields.iter().map(|s| s.to_string()).collect();
+
+    if result[hour_idx] != "*" {
+        let shifted: Vec<String> = result[hour_idx]
+            .split(',')
+            .map(|part| {
+                // Handle step: e.g. "8-17/2" or "*/2"
+                if let Some(step_pos) = part.find('/') {
+                    let base = &part[..step_pos];
+                    let step = &part[step_pos..];
+                    if base == "*" {
+                        return format!("*{step}");
+                    }
+                    if let Some(dash_pos) = base.find('-') {
+                        let s: i32 = base[..dash_pos].parse().unwrap_or(0);
+                        let e: i32 = base[dash_pos + 1..].parse().unwrap_or(0);
+                        let ns = ((s - tz_offset_hours) % 24 + 24) % 24;
+                        let ne = ((e - tz_offset_hours) % 24 + 24) % 24;
+                        return format!("{ns}-{ne}{step}");
+                    }
+                    return part.to_string();
+                }
+                // Handle range: e.g. "8-17"
+                if let Some(dash_pos) = part.find('-') {
+                    let s: i32 = part[..dash_pos].parse().unwrap_or(0);
+                    let e: i32 = part[dash_pos + 1..].parse().unwrap_or(0);
+                    let ns = ((s - tz_offset_hours) % 24 + 24) % 24;
+                    let ne = ((e - tz_offset_hours) % 24 + 24) % 24;
+                    return format!("{ns}-{ne}");
+                }
+                // Handle single integer
+                if let Ok(h) = part.parse::<i32>() {
+                    return format!("{}", ((h - tz_offset_hours) % 24 + 24) % 24);
+                }
+                part.to_string()
+            })
+            .collect();
+        result[hour_idx] = shifted.join(",");
     }
-    
-    format!("{} {} {} {} {} {}", parts[0], parts[1], new_hour_str, parts[3], parts[4], parts[5])
+
+    result.join(" ")
 }
