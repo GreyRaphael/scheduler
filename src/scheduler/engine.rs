@@ -363,46 +363,29 @@ async fn run_task(
         }
     }
 
-    // Update task run info
+    // Update task run info (common for both manual and scheduled)
+    let last_run_status = if success { "success".to_string() } else { "failed".to_string() };
+    if let Ok(conn) = pool.get().await {
+        let _ = conn.interact(move |c| {
+            task_repo::update_task_run_info(
+                c,
+                task_id,
+                Some(Utc::now()),
+                None,
+                None,
+                Some(&last_run_status),
+            )
+        }).await;
+    }
+
     let next_run = if !is_manual {
-        let conn_res = pool.get().await;
-        if let Ok(conn) = conn_res {
-            let last_run_status = if success { "success".to_string() } else { "failed".to_string() };
-            let _ = conn.interact(move |c| {
-                task_repo::update_task_run_info(
-                    c,
-                    task_id,
-                    Some(Utc::now()),
-                    None,
-                    None,
-                    Some(&last_run_status),
-                )
-            }).await;
-        }
         calculate_next_run_for_task(&task)
     } else {
-        let conn_res = pool.get().await;
-        if let Ok(conn) = conn_res {
-            let last_run_status = if success { "success".to_string() } else { "failed".to_string() };
-            let _ = conn.interact(move |c| {
-                task_repo::update_task_run_info(
-                    c,
-                    task_id,
-                    Some(Utc::now()),
-                    None,
-                    None,
-                    Some(&last_run_status),
-                )
-            }).await;
-        }
+        info!("Manual task '{}' completed", task_name);
         None
     };
 
-    if is_manual {
-        info!("Manual task '{}' completed", task_name);
-    }
-
-        Some(TaskCompletion {
+    Some(TaskCompletion {
         task_id,
         task_name,
         next_run,

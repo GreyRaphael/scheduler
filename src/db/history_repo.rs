@@ -16,7 +16,7 @@ fn row_to_history(row: &rusqlite::Row) -> rusqlite::Result<ExecutionHistory> {
             .get::<_, Option<String>>(4)?
             .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
             .map(|dt| dt.with_timezone(&Utc)),
-        status: RunStatus::from_str(&row.get::<_, String>(5)?).unwrap_or(RunStatus::Failed),
+        status: row.get::<_, String>(5)?.parse().unwrap_or(RunStatus::Failed),
         exit_code: row.get(6)?,
         stdout: row.get(7)?,
         stderr: row.get(8)?,

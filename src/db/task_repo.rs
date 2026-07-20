@@ -17,13 +17,13 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
         id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or_default(),
         name: row.get(1)?,
         description: row.get(2)?,
-        trigger_type: TriggerType::from_str(&row.get::<_, String>(3)?).unwrap_or(TriggerType::Cron),
+        trigger_type: row.get::<_, String>(3)?.parse().unwrap_or(TriggerType::Cron),
         trigger_expr: row.get(4)?,
         command_config: row.get::<_, Option<String>>(5)?
             .and_then(|s| serde_json::from_str(&s).ok()),
         webhook_config: row.get::<_, Option<String>>(6)?
             .and_then(|s| serde_json::from_str(&s).ok()),
-        status: TaskStatus::from_str(&row.get::<_, String>(7)?).unwrap_or(TaskStatus::Active),
+        status: row.get::<_, String>(7)?.parse().unwrap_or(TaskStatus::Active),
         enabled: row.get::<_, i32>(8)? != 0,
         created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(9)?)
             .unwrap_or_default()

@@ -1,5 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::str::FromStr;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -22,15 +24,24 @@ impl RunStatus {
             RunStatus::Cancelled => "cancelled",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Option<Self> {
+impl fmt::Display for RunStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for RunStatus {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "running" => Some(RunStatus::Running),
-            "success" => Some(RunStatus::Success),
-            "failed" => Some(RunStatus::Failed),
-            "timeout" => Some(RunStatus::Timeout),
-            "cancelled" => Some(RunStatus::Cancelled),
-            _ => None,
+            "running" => Ok(RunStatus::Running),
+            "success" => Ok(RunStatus::Success),
+            "failed" => Ok(RunStatus::Failed),
+            "timeout" => Ok(RunStatus::Timeout),
+            "cancelled" => Ok(RunStatus::Cancelled),
+            _ => Err(format!("Unknown run status: {s}")),
         }
     }
 }

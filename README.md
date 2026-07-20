@@ -236,7 +236,7 @@ export SCHEDULER_TOKEN=mytoken
 
 ### Command（执行命令）
 
-通过系统 Shell 执行命令（Linux/macOS 使用 `sh -c`，Windows 使用 `cmd /C`）。
+直接执行指定程序（不经过 Shell），通过 `program` 指定可执行文件路径，`args` 传递参数列表。
 
 ```json
 {
@@ -252,7 +252,7 @@ export SCHEDULER_TOKEN=mytoken
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `program` | string | 是 | 要执行的程序或脚本路径 |
-| `args` | string[] | 否 | 命令参数列表，会用空格拼接 |
+| `args` | string[] | 否 | 命令参数列表 |
 | `env` | object | 否 | 额外的环境变量 |
 | `working_dir` | string | 否 | 工作目录 |
 

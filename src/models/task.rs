@@ -1,5 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::str::FromStr;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -18,13 +20,22 @@ impl TriggerType {
             TriggerType::Interval => "interval",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Option<Self> {
+impl fmt::Display for TriggerType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for TriggerType {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "cron" => Some(TriggerType::Cron),
-            "once" => Some(TriggerType::Once),
-            "interval" => Some(TriggerType::Interval),
-            _ => None,
+            "cron" => Ok(TriggerType::Cron),
+            "once" => Ok(TriggerType::Once),
+            "interval" => Ok(TriggerType::Interval),
+            _ => Err(format!("Unknown trigger type: {s}")),
         }
     }
 }
@@ -47,14 +58,23 @@ impl TaskStatus {
             TaskStatus::Failed => "failed",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Option<Self> {
+impl fmt::Display for TaskStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for TaskStatus {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "active" => Some(TaskStatus::Active),
-            "paused" => Some(TaskStatus::Paused),
-            "completed" => Some(TaskStatus::Completed),
-            "failed" => Some(TaskStatus::Failed),
-            _ => None,
+            "active" => Ok(TaskStatus::Active),
+            "paused" => Ok(TaskStatus::Paused),
+            "completed" => Ok(TaskStatus::Completed),
+            "failed" => Ok(TaskStatus::Failed),
+            _ => Err(format!("Unknown task status: {s}")),
         }
     }
 }
