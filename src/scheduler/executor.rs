@@ -1,11 +1,19 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::sync::LazyLock;
 use std::time::Duration;
 use tokio::process::Command;
 use tracing::debug;
 
 use crate::models::Task;
+
+static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .pool_max_idle_per_host(10)
+        .build()
+        .expect("Failed to build HTTP client")
+});
 
 #[derive(Debug, Deserialize)]
 pub struct CommandConfig {
@@ -167,17 +175,12 @@ async fn execute_webhook(config_val: &serde_json::Value, timeout: Duration, ctx:
 
     debug!("Sending webhook: {} {}", config.method, config.url);
 
-    let client = reqwest::Client::builder()
-        .timeout(timeout)
-        .build()
-        .context("Failed to build HTTP client")?;
-
     let method: reqwest::Method = config
         .method
         .parse()
         .context("Invalid HTTP method")?;
 
-    let mut req = client.request(method, &config.url);
+    let mut req = HTTP_CLIENT.request(method, &config.url).timeout(timeout);
 
     let mut is_json = true;
     let mut has_ct = false;
