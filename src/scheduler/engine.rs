@@ -1,7 +1,7 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
-use chrono::{DateTime, Local, Offset, Utc};
+use chrono::{DateTime, Local, Utc};
 use cron::Schedule;
 use std::str::FromStr;
 use tokio::sync::mpsc;
@@ -408,24 +408,14 @@ async fn run_task(
 fn calculate_next_run_for_task(task: &Task) -> Option<DateTime<Utc>> {
     match task.trigger_type {
         TriggerType::Cron => {
-            let tz_offset_secs = if task.cron_tz_mode == "local" {
-                Local::now().offset().fix().local_minus_utc()
-            } else if task.cron_tz_mode == "utc" {
-                0
+            let schedule = Schedule::from_str(&task.trigger_expr).ok()?;
+            if task.cron_tz_mode == "local" {
+                schedule.after(&Local::now()).next().map(|dt| dt.with_timezone(&Utc))
             } else {
                 let tz: chrono_tz::Tz = task.cron_tz_mode.parse().unwrap_or(chrono_tz::UTC);
                 let now = Utc::now().with_timezone(&tz);
-                now.offset().fix().local_minus_utc()
-            };
-
-            let expr = if tz_offset_secs != 0 {
-                convert_cron_to_utc(&task.trigger_expr, tz_offset_secs)
-            } else {
-                task.trigger_expr.clone()
-            };
-
-            let schedule = Schedule::from_str(&expr).ok()?;
-            schedule.after(&Utc::now()).next()
+                schedule.after(&now).next().map(|dt| dt.with_timezone(&Utc))
+            }
         }
         TriggerType::Once => {
             let dt = DateTime::parse_from_rfc3339(&task.trigger_expr).ok()?;
@@ -448,58 +438,25 @@ fn calculate_next_run_for_task(task: &Task) -> Option<DateTime<Utc>> {
     }
 }
 
-fn convert_cron_to_utc(expr: &str, tz_offset_secs: i32) -> String {
-    let tz_offset_hours = tz_offset_secs / 3600;
-    if tz_offset_hours == 0 {
-        return expr.to_string();
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+    use chrono_tz::Asia::Shanghai;
+
+    #[test]
+    fn test_cron_timezone_awareness() {
+        // Verify that the cron crate properly handles timezones and does not just assume UTC.
+        let schedule = Schedule::from_str("0 0 8 * * *").unwrap();
+        // 14:00 CST on Jan 1st
+        let now = Shanghai.with_ymd_and_hms(2023, 1, 1, 14, 0, 0).unwrap();
+        
+        let next = schedule.after(&now).next().unwrap();
+        
+        // The next occurrence should be 08:00 CST on Jan 2nd
+        assert_eq!(
+            next,
+            Shanghai.with_ymd_and_hms(2023, 1, 2, 8, 0, 0).unwrap()
+        );
     }
-
-    let fields: Vec<&str> = expr.split_whitespace().collect();
-    // 6-field cron: sec min hour dom month dow
-    let hour_idx = if fields.len() == 6 { 2 } else { 1 };
-    if fields.len() < 5 {
-        return expr.to_string();
-    }
-
-    let mut result: Vec<String> = fields.iter().map(|s| s.to_string()).collect();
-
-    if result[hour_idx] != "*" {
-        let shifted: Vec<String> = result[hour_idx]
-            .split(',')
-            .map(|part| {
-                // Handle step: e.g. "8-17/2" or "*/2"
-                if let Some(step_pos) = part.find('/') {
-                    let base = &part[..step_pos];
-                    let step = &part[step_pos..];
-                    if base == "*" {
-                        return format!("*{step}");
-                    }
-                    if let Some(dash_pos) = base.find('-') {
-                        let s: i32 = base[..dash_pos].parse().unwrap_or(0);
-                        let e: i32 = base[dash_pos + 1..].parse().unwrap_or(0);
-                        let ns = ((s - tz_offset_hours) % 24 + 24) % 24;
-                        let ne = ((e - tz_offset_hours) % 24 + 24) % 24;
-                        return format!("{ns}-{ne}{step}");
-                    }
-                    return part.to_string();
-                }
-                // Handle range: e.g. "8-17"
-                if let Some(dash_pos) = part.find('-') {
-                    let s: i32 = part[..dash_pos].parse().unwrap_or(0);
-                    let e: i32 = part[dash_pos + 1..].parse().unwrap_or(0);
-                    let ns = ((s - tz_offset_hours) % 24 + 24) % 24;
-                    let ne = ((e - tz_offset_hours) % 24 + 24) % 24;
-                    return format!("{ns}-{ne}");
-                }
-                // Handle single integer
-                if let Ok(h) = part.parse::<i32>() {
-                    return format!("{}", ((h - tz_offset_hours) % 24 + 24) % 24);
-                }
-                part.to_string()
-            })
-            .collect();
-        result[hour_idx] = shifted.join(",");
-    }
-
-    result.join(" ")
 }
