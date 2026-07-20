@@ -1,15 +1,15 @@
 use axum::extract::State;
-use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 
+use super::error::AppError;
 use super::AppState;
 
-async fn status(State(state): State<AppState>) -> impl IntoResponse {
-    let conn_opt = state.pool.get().await;
-    if let Ok(conn) = conn_opt {
-        let stats = conn.interact(move |c| {
+async fn status(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
+    let conn = state.pool.get().await.map_err(AppError::internal)?;
+    let stats = conn
+        .interact(move |c| {
             let total: i64 = c.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))?;
             let active: i64 = c.query_row(
                 "SELECT COUNT(*) FROM tasks WHERE enabled = 1 AND status = 'active'",
@@ -39,35 +39,42 @@ async fn status(State(state): State<AppState>) -> impl IntoResponse {
                 "runs_today": runs_today,
             }))
         })
-        .await;
+        .await
+        .map_err(AppError::internal)?
+        .map_err(AppError::internal)?;
 
-        match stats {
-            Ok(Ok(s)) => return Json(s).into_response(),
-            _ => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-        }
-    }
-    StatusCode::INTERNAL_SERVER_ERROR.into_response()
+    Ok(Json(stats))
 }
 
-async fn pause_scheduler(State(state): State<AppState>) -> impl IntoResponse {
-    match state.scheduler_tx.send(crate::scheduler::SchedulerCommand::Pause).await {
-        Ok(()) => Json(serde_json::json!({"message": "Scheduler paused"})).into_response(),
-        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
-    }
+async fn pause_scheduler(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
+    state
+        .scheduler_tx
+        .send(crate::scheduler::SchedulerCommand::Pause)
+        .await
+        .map_err(|_| AppError::unavailable("Scheduler is not available"))?;
+    Ok(Json(serde_json::json!({"message": "Scheduler paused"})))
 }
 
-async fn resume_scheduler(State(state): State<AppState>) -> impl IntoResponse {
-    match state.scheduler_tx.send(crate::scheduler::SchedulerCommand::Resume).await {
-        Ok(()) => Json(serde_json::json!({"message": "Scheduler resumed"})).into_response(),
-        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
-    }
+async fn resume_scheduler(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
+    state
+        .scheduler_tx
+        .send(crate::scheduler::SchedulerCommand::Resume)
+        .await
+        .map_err(|_| AppError::unavailable("Scheduler is not available"))?;
+    Ok(Json(
+        serde_json::json!({"message": "Scheduler resumed"}),
+    ))
 }
 
-async fn reload_scheduler(State(state): State<AppState>) -> impl IntoResponse {
-    match state.scheduler_tx.send(crate::scheduler::SchedulerCommand::Reload).await {
-        Ok(()) => Json(serde_json::json!({"message": "Scheduler reloaded"})).into_response(),
-        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
-    }
+async fn reload_scheduler(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
+    state
+        .scheduler_tx
+        .send(crate::scheduler::SchedulerCommand::Reload)
+        .await
+        .map_err(|_| AppError::unavailable("Scheduler is not available"))?;
+    Ok(Json(
+        serde_json::json!({"message": "Scheduler reloaded"}),
+    ))
 }
 
 pub fn router(_state: AppState) -> Router<AppState> {

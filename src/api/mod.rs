@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod error;
 pub mod tasks;
 pub mod history;
 pub mod scheduler_control;
