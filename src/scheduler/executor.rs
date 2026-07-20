@@ -101,11 +101,11 @@ fn render_template(template: &str, ctx: &TaskContext, is_json: bool) -> String {
     result
 }
 
-pub async fn execute_task(task: &Task) -> Result<TaskOutput> {
+pub async fn execute_task(task: &Task, default_timeout: u64) -> Result<TaskOutput> {
     let timeout = task
         .timeout_secs
         .map(Duration::from_secs)
-        .unwrap_or(Duration::from_secs(3600));
+        .unwrap_or(Duration::from_secs(default_timeout));
 
     let mut ctx = TaskContext {
         task_name: task.name.clone(),

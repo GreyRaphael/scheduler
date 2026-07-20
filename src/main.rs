@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
     let pool = db::init_db(&db_path).await?;
     info!("Database initialized: {db_path}");
 
-    let engine = scheduler::SchedulerEngine::new(pool.clone());
+    let engine = scheduler::SchedulerEngine::new(pool.clone(), config.max_history());
     let scheduler_tx = engine.command_sender();
 
     let scheduler_handle = tokio::spawn(async move {

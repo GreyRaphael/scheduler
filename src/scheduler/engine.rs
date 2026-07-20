@@ -58,15 +58,17 @@ impl Ord for ScheduleEntry {
 
 pub struct SchedulerEngine {
     pool: DbPool,
+    max_history: usize,
     cmd_tx: mpsc::Sender<SchedulerCommand>,
     cmd_rx: mpsc::Receiver<SchedulerCommand>,
 }
 
 impl SchedulerEngine {
-    pub fn new(pool: DbPool) -> Self {
+    pub fn new(pool: DbPool, max_history: usize) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel(64);
         Self {
             pool,
+            max_history,
             cmd_tx,
             cmd_rx,
         }
@@ -109,8 +111,9 @@ impl SchedulerEngine {
                         SchedulerCommand::TriggerNow(task_id) => {
                             let pool = self.pool.clone();
                             let tx = completion_tx.clone();
+                            let default_timeout = crate::config::DEFAULT_TIMEOUT;
                             tokio::spawn(async move {
-                                let result = run_task(pool, task_id, true).await;
+                                let result = run_task(pool, task_id, true, default_timeout).await;
                                 if let Some(comp) = result {
                                     let _ = tx.send(comp).await;
                                 }
@@ -169,8 +172,9 @@ impl SchedulerEngine {
                         if entry.next_run <= Utc::now() {
                             let pool = self.pool.clone();
                             let tx = completion_tx.clone();
+                            let default_timeout = crate::config::DEFAULT_TIMEOUT;
                             tokio::spawn(async move {
-                                if let Some(comp) = run_task(pool, entry.task_id, false).await {
+                                if let Some(comp) = run_task(pool, entry.task_id, false, default_timeout).await {
                                     let _ = tx.send(comp).await;
                                 }
                             });
@@ -191,9 +195,10 @@ impl SchedulerEngine {
         }
         let conn = conn_res.unwrap();
         
-        let (_, updates) = match conn.interact(|c| {
+        let max_history = self.max_history;
+        let (_, updates) = match conn.interact(move |c| {
             // Also cleanup history occasionally
-            let _ = history_repo::cleanup_old_history(c, 1000);
+            let _ = history_repo::cleanup_old_history(c, max_history);
             
             let tasks = task_repo::get_all_enabled_tasks(c)?;
             let mut updates = Vec::new();
@@ -232,6 +237,7 @@ async fn run_task(
     pool: DbPool,
     task_id: Uuid,
     is_manual: bool,
+    default_timeout: u64,
 ) -> Option<TaskCompletion> {
     let task = {
         let conn = match pool.get().await {
@@ -287,7 +293,7 @@ async fn run_task(
             }
         };
 
-        let result = executor::execute_task(&task).await;
+        let result = executor::execute_task(&task, default_timeout).await;
 
         {
             let conn = match pool.get().await {
